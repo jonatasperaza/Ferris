@@ -17,6 +17,7 @@ struct GpuState {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     window: Arc<Window>,
+    quad_pipeline: renderer::quad::QuadPipeline,
 }
 
 impl GpuState {
@@ -82,7 +83,9 @@ impl GpuState {
         };
         surface.configure(&device, &config);
 
-        Some(Self { surface, device, queue, config, window })
+        let quad_pipeline = renderer::quad::QuadPipeline::new(&device, format);
+
+        Some(Self { surface, device, queue, config, window, quad_pipeline })
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -94,15 +97,18 @@ impl GpuState {
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn render_clear(&self) -> Result<(), wgpu::SurfaceError> {
+    fn render_frame(&mut self, frame: &scene::Frame) -> Result<(), wgpu::SurfaceError> {
+        let instances = renderer::quad::build_quad_instances(frame);
+        self.quad_pipeline.prepare(&self.device, &self.queue, &instances, self.config.width as f32, self.config.height as f32);
+
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("clear_encoder"),
+            label: Some("frame_encoder"),
         });
         {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear_pass"),
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("frame_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -115,6 +121,7 @@ impl GpuState {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            self.quad_pipeline.render(&mut pass, instances.len() as u32);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
@@ -156,7 +163,21 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
             WindowEvent::RedrawRequested => {
-                match gpu.render_clear() {
+                let mut frame = scene::Frame::new();
+                frame.push(scene::DrawCommand::Rect(scene::RectCommand {
+                    x: 100.0, y: 100.0, width: 120.0, height: 80.0,
+                    color: [0.9, 0.2, 0.2, 1.0], corner_radius: 12.0,
+                }));
+                frame.push(scene::DrawCommand::Rect(scene::RectCommand {
+                    x: 260.0, y: 160.0, width: 90.0, height: 90.0,
+                    color: [0.2, 0.7, 0.3, 1.0], corner_radius: 45.0,
+                }));
+                frame.push(scene::DrawCommand::Rect(scene::RectCommand {
+                    x: 400.0, y: 100.0, width: 150.0, height: 60.0,
+                    color: [0.2, 0.4, 0.9, 1.0], corner_radius: 4.0,
+                }));
+
+                match gpu.render_frame(&frame) {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                         let (w, h) = (gpu.config.width, gpu.config.height);
