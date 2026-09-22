@@ -18,6 +18,7 @@ struct GpuState {
     config: wgpu::SurfaceConfiguration,
     window: Arc<Window>,
     quad_pipeline: renderer::quad::QuadPipeline,
+    text_layer: renderer::text::TextLayer,
 }
 
 impl GpuState {
@@ -84,8 +85,9 @@ impl GpuState {
         surface.configure(&device, &config);
 
         let quad_pipeline = renderer::quad::QuadPipeline::new(&device, format);
+        let text_layer = renderer::text::TextLayer::new(&device, &queue, format);
 
-        Some(Self { surface, device, queue, config, window, quad_pipeline })
+        Some(Self { surface, device, queue, config, window, quad_pipeline, text_layer })
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -100,6 +102,12 @@ impl GpuState {
     fn render_frame(&mut self, frame: &scene::Frame) -> Result<(), wgpu::SurfaceError> {
         let instances = renderer::quad::build_quad_instances(frame);
         self.quad_pipeline.prepare(&self.device, &self.queue, &instances, self.config.width as f32, self.config.height as f32);
+
+        let texts: Vec<scene::TextCommand> = frame.commands.iter().filter_map(|c| match c {
+            scene::DrawCommand::Text(t) => Some(t.clone()),
+            scene::DrawCommand::Rect(_) => None,
+        }).collect();
+        self.text_layer.prepare(&self.device, &self.queue, self.config.width, self.config.height, &texts);
 
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -122,9 +130,11 @@ impl GpuState {
                 occlusion_query_set: None,
             });
             self.quad_pipeline.render(&mut pass, instances.len() as u32);
+            self.text_layer.render(&mut pass);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        self.text_layer.trim_atlas();
         Ok(())
     }
 }
@@ -175,6 +185,9 @@ impl ApplicationHandler for App {
                 frame.push(scene::DrawCommand::Rect(scene::RectCommand {
                     x: 400.0, y: 100.0, width: 150.0, height: 60.0,
                     color: [0.2, 0.4, 0.9, 1.0], corner_radius: 4.0,
+                }));
+                frame.push(scene::DrawCommand::Text(scene::TextCommand {
+                    x: 20.0, y: 20.0, content: "Ferris compositor".to_string(), size: 24.0, color: [1.0, 1.0, 1.0, 1.0],
                 }));
 
                 match gpu.render_frame(&frame) {

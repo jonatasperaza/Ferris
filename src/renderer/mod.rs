@@ -1,5 +1,5 @@
 pub mod quad;
-// pub mod text;
+pub mod text;
 
 pub fn choose_present_mode(supported: &[wgpu::PresentMode]) -> wgpu::PresentMode {
     const PREFERENCE: [wgpu::PresentMode; 3] = [
