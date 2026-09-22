@@ -1,3 +1,4 @@
+mod perf;
 mod renderer;
 
 use std::sync::Arc;
