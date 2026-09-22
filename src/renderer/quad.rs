@@ -12,17 +12,20 @@ pub struct QuadInstance {
     pub corner_radius: f32,
 }
 
-pub fn build_quad_instances(frame: &Frame) -> Vec<QuadInstance> {
+pub fn build_quad_instances(frame: &Frame, scale_factor: f32) -> Vec<QuadInstance> {
     frame
         .commands
         .iter()
         .filter_map(|cmd| match cmd {
-            DrawCommand::Rect(r) => Some(QuadInstance {
-                position: [r.x, r.y],
-                size: [r.width, r.height],
-                color: r.color,
-                corner_radius: r.corner_radius,
-            }),
+            DrawCommand::Rect(r) => {
+                let scaled = r.scaled(scale_factor);
+                Some(QuadInstance {
+                    position: [scaled.x, scaled.y],
+                    size: [scaled.width, scaled.height],
+                    color: scaled.color,
+                    corner_radius: scaled.corner_radius,
+                })
+            }
             DrawCommand::Text(_) => None,
         })
         .collect()
@@ -256,7 +259,7 @@ mod tests {
             x: 5.0, y: 6.0, width: 30.0, height: 40.0, color: [0.0, 1.0, 0.0, 1.0], corner_radius: 0.0,
         }));
 
-        let instances = build_quad_instances(&frame);
+        let instances = build_quad_instances(&frame, 1.0);
         assert_eq!(instances.len(), 2);
         assert_eq!(instances[0].position, [1.0, 2.0]);
         assert_eq!(instances[0].size, [10.0, 20.0]);
@@ -267,6 +270,20 @@ mod tests {
     #[test]
     fn empty_frame_yields_no_instances() {
         let frame = Frame::new();
-        assert!(build_quad_instances(&frame).is_empty());
+        assert!(build_quad_instances(&frame, 1.0).is_empty());
+    }
+
+    #[test]
+    fn applies_scale_factor_to_position_size_and_radius() {
+        let mut frame = Frame::new();
+        frame.push(DrawCommand::Rect(RectCommand {
+            x: 10.0, y: 20.0, width: 30.0, height: 40.0, color: [1.0, 0.0, 0.0, 1.0], corner_radius: 5.0,
+        }));
+
+        let instances = build_quad_instances(&frame, 2.0);
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].position, [20.0, 40.0]);
+        assert_eq!(instances[0].size, [60.0, 80.0]);
+        assert_eq!(instances[0].corner_radius, 10.0);
     }
 }

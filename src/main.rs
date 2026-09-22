@@ -39,7 +39,8 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        match Renderer::new(window.clone()) {
+        let scale_factor = window.scale_factor() as f32;
+        match Renderer::new(window.clone(), scale_factor) {
             Some(gpu) => {
                 self.gpu = Some(gpu);
                 self.window = Some(window);
@@ -56,6 +57,9 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                gpu.set_scale_factor(scale_factor as f32);
+            }
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
                 if let Some(last) = self.last_frame_start {

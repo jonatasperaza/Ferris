@@ -28,10 +28,11 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     quad_pipeline: quad::QuadPipeline,
     text_layer: text::TextLayer,
+    scale_factor: f32,
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>) -> Option<Self> {
+    pub fn new(window: Arc<Window>, scale_factor: f32) -> Option<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
         let surface = match instance.create_surface(window.clone()) {
@@ -96,7 +97,7 @@ impl Renderer {
         let quad_pipeline = quad::QuadPipeline::new(&device, format);
         let text_layer = text::TextLayer::new(&device, &queue, format);
 
-        Some(Self { surface, device, queue, config, quad_pipeline, text_layer })
+        Some(Self { surface, device, queue, config, quad_pipeline, text_layer, scale_factor })
     }
 
     pub fn width(&self) -> u32 {
@@ -116,12 +117,16 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
+    pub fn set_scale_factor(&mut self, factor: f32) {
+        self.scale_factor = factor;
+    }
+
     pub fn render_frame(&mut self, frame: &scene::Frame) -> Result<(), wgpu::SurfaceError> {
-        let instances = quad::build_quad_instances(frame);
+        let instances = quad::build_quad_instances(frame, self.scale_factor);
         self.quad_pipeline.prepare(&self.device, &self.queue, &instances, self.config.width as f32, self.config.height as f32);
 
         let texts: Vec<scene::TextCommand> = frame.commands.iter().filter_map(|c| match c {
-            scene::DrawCommand::Text(t) => Some(t.clone()),
+            scene::DrawCommand::Text(t) => Some(t.scaled(self.scale_factor)),
             scene::DrawCommand::Rect(_) => None,
         }).collect();
         self.text_layer.prepare(&self.device, &self.queue, self.config.width, self.config.height, &texts);
