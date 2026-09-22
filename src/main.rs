@@ -139,10 +139,24 @@ impl GpuState {
     }
 }
 
-#[derive(Default)]
 struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuState>,
+    start: std::time::Instant,
+    frame_timer: perf::FrameTimer,
+    last_frame_start: Option<std::time::Instant>,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            window: None,
+            gpu: None,
+            start: std::time::Instant::now(),
+            frame_timer: perf::FrameTimer::new(120),
+            last_frame_start: None,
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -173,21 +187,24 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
             WindowEvent::RedrawRequested => {
-                let mut frame = scene::Frame::new();
-                frame.push(scene::DrawCommand::Rect(scene::RectCommand {
-                    x: 100.0, y: 100.0, width: 120.0, height: 80.0,
-                    color: [0.9, 0.2, 0.2, 1.0], corner_radius: 12.0,
-                }));
-                frame.push(scene::DrawCommand::Rect(scene::RectCommand {
-                    x: 260.0, y: 160.0, width: 90.0, height: 90.0,
-                    color: [0.2, 0.7, 0.3, 1.0], corner_radius: 45.0,
-                }));
-                frame.push(scene::DrawCommand::Rect(scene::RectCommand {
-                    x: 400.0, y: 100.0, width: 150.0, height: 60.0,
-                    color: [0.2, 0.4, 0.9, 1.0], corner_radius: 4.0,
-                }));
+                let now = std::time::Instant::now();
+                if let Some(last) = self.last_frame_start {
+                    self.frame_timer.record(now - last);
+                }
+                self.last_frame_start = Some(now);
+
+                let elapsed = self.start.elapsed().as_secs_f32();
+                let (w, h) = (gpu.config.width as f32, gpu.config.height as f32);
+                let mut frame = scene::build_test_scene(elapsed, w, h);
+
+                let overlay = format!(
+                    "{:.1} fps | {:.2} ms/frame | budget {}",
+                    self.frame_timer.fps(),
+                    self.frame_timer.average_frame_time().as_secs_f32() * 1000.0,
+                    if self.frame_timer.meets_budget(perf::BUDGET_120FPS) { "OK" } else { "MISSED" },
+                );
                 frame.push(scene::DrawCommand::Text(scene::TextCommand {
-                    x: 20.0, y: 20.0, content: "Ferris compositor".to_string(), size: 24.0, color: [1.0, 1.0, 1.0, 1.0],
+                    x: 20.0, y: 50.0, content: overlay, size: 18.0, color: [1.0, 0.9, 0.3, 1.0],
                 }));
 
                 match gpu.render_frame(&frame) {
