@@ -1,6 +1,4 @@
-mod perf;
-mod scene;
-mod renderer;
+use ferris_compositor::{perf, renderer, scene};
 
 use std::sync::Arc;
 
