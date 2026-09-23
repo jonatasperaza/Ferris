@@ -1,3 +1,6 @@
+/// A rectangle draw command. `x`, `y`, `width`, `height`, and `corner_radius`
+/// are all in logical pixels (CSS-like) — the renderer applies the display's
+/// scale factor when converting to physical pixels for the GPU.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RectCommand {
     pub x: f32,
@@ -8,6 +11,9 @@ pub struct RectCommand {
     pub corner_radius: f32,
 }
 
+/// A text draw command. `x`, `y`, and `size` are in logical pixels (CSS-like)
+/// — the renderer applies the display's scale factor when converting to
+/// physical pixels for the GPU.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextCommand {
     pub x: f32,

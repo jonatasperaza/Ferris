@@ -65,10 +65,16 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
+                if !occluded {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
             }
             WindowEvent::RedrawRequested => {
                 let minimized = self.window.as_ref().and_then(|w| w.is_minimized()).unwrap_or(false);
                 if self.occluded || minimized {
+                    self.last_frame_start = None;
                     return;
                 }
 
@@ -79,7 +85,7 @@ impl ApplicationHandler for App {
                 self.last_frame_start = Some(now);
 
                 let elapsed = self.start.elapsed().as_secs_f32();
-                let (w, h) = (gpu.width() as f32, gpu.height() as f32);
+                let (w, h) = (gpu.logical_width(), gpu.logical_height());
                 let mut frame = scene::build_test_scene(elapsed, w, h);
 
                 let overlay = format!(
@@ -109,7 +115,13 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let minimized = self.window.as_ref().and_then(|w| w.is_minimized()).unwrap_or(false);
+        if self.occluded || minimized {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+        event_loop.set_control_flow(ControlFlow::Poll);
         if let Some(window) = &self.window {
             window.request_redraw();
         }

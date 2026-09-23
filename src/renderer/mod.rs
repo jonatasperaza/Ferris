@@ -7,6 +7,13 @@ use winit::window::Window;
 
 use crate::scene;
 
+/// Converts a physical pixel dimension to logical (scale-factor-independent)
+/// pixels. Extracted as a free function so it's unit-testable without a live
+/// GPU device (which `Renderer` requires).
+fn physical_to_logical(physical: f32, scale_factor: f32) -> f32 {
+    physical / scale_factor
+}
+
 pub fn choose_present_mode(supported: &[wgpu::PresentMode], uncapped: bool) -> wgpu::PresentMode {
     let preference: [wgpu::PresentMode; 3] = if uncapped {
         [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox, wgpu::PresentMode::Fifo]
@@ -100,12 +107,26 @@ impl Renderer {
         Some(Self { surface, device, queue, config, quad_pipeline, text_layer, scale_factor })
     }
 
+    /// Physical pixel width of the surface.
     pub fn width(&self) -> u32 {
         self.config.width
     }
 
+    /// Physical pixel height of the surface.
     pub fn height(&self) -> u32 {
         self.config.height
+    }
+
+    /// Logical (scale-factor-independent) width of the surface, i.e. the
+    /// unit scene commands (`RectCommand`/`TextCommand`) are expressed in.
+    pub fn logical_width(&self) -> f32 {
+        physical_to_logical(self.config.width as f32, self.scale_factor)
+    }
+
+    /// Logical (scale-factor-independent) height of the surface, i.e. the
+    /// unit scene commands (`RectCommand`/`TextCommand`) are expressed in.
+    pub fn logical_height(&self) -> f32 {
+        physical_to_logical(self.config.height as f32, self.scale_factor)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -195,5 +216,16 @@ mod tests {
             wgpu::PresentMode::Immediate,
         ];
         assert_eq!(choose_present_mode(&supported, true), wgpu::PresentMode::Immediate);
+    }
+
+    #[test]
+    fn physical_to_logical_at_scale_one_is_identity() {
+        assert_eq!(physical_to_logical(800.0, 1.0), 800.0);
+    }
+
+    #[test]
+    fn physical_to_logical_divides_by_scale_factor() {
+        assert_eq!(physical_to_logical(1200.0, 1.5), 800.0);
+        assert_eq!(physical_to_logical(1600.0, 2.0), 800.0);
     }
 }
