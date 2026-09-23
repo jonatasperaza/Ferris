@@ -15,6 +15,7 @@ struct App {
     start: std::time::Instant,
     frame_timer: perf::FrameTimer,
     last_frame_start: Option<std::time::Instant>,
+    occluded: bool,
 }
 
 impl Default for App {
@@ -25,6 +26,7 @@ impl Default for App {
             start: std::time::Instant::now(),
             frame_timer: perf::FrameTimer::new(120),
             last_frame_start: None,
+            occluded: false,
         }
     }
 }
@@ -40,7 +42,8 @@ impl ApplicationHandler for App {
             }
         };
         let scale_factor = window.scale_factor() as f32;
-        match Renderer::new(window.clone(), scale_factor) {
+        let uncapped = std::env::var("FERRIS_UNCAPPED").map(|v| v == "1").unwrap_or(false);
+        match Renderer::new(window.clone(), scale_factor, uncapped) {
             Some(gpu) => {
                 self.gpu = Some(gpu);
                 self.window = Some(window);
@@ -60,7 +63,15 @@ impl ApplicationHandler for App {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 gpu.set_scale_factor(scale_factor as f32);
             }
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+            }
             WindowEvent::RedrawRequested => {
+                let minimized = self.window.as_ref().and_then(|w| w.is_minimized()).unwrap_or(false);
+                if self.occluded || minimized {
+                    return;
+                }
+
                 let now = std::time::Instant::now();
                 if let Some(last) = self.last_frame_start {
                     self.frame_timer.record(now - last);
@@ -92,9 +103,6 @@ impl ApplicationHandler for App {
                         event_loop.exit();
                     }
                     Err(e) => log::warn!("surface error: {e:?}"),
-                }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
                 }
             }
             _ => {}

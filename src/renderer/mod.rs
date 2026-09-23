@@ -7,13 +7,13 @@ use winit::window::Window;
 
 use crate::scene;
 
-pub fn choose_present_mode(supported: &[wgpu::PresentMode]) -> wgpu::PresentMode {
-    const PREFERENCE: [wgpu::PresentMode; 3] = [
-        wgpu::PresentMode::Immediate,
-        wgpu::PresentMode::Mailbox,
-        wgpu::PresentMode::Fifo,
-    ];
-    for mode in PREFERENCE {
+pub fn choose_present_mode(supported: &[wgpu::PresentMode], uncapped: bool) -> wgpu::PresentMode {
+    let preference: [wgpu::PresentMode; 3] = if uncapped {
+        [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox, wgpu::PresentMode::Fifo]
+    } else {
+        [wgpu::PresentMode::Fifo, wgpu::PresentMode::Mailbox, wgpu::PresentMode::Immediate]
+    };
+    for mode in preference {
         if supported.contains(&mode) {
             return mode;
         }
@@ -32,7 +32,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>, scale_factor: f32) -> Option<Self> {
+    pub fn new(window: Arc<Window>, scale_factor: f32, uncapped: bool) -> Option<Self> {
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
         let surface = match instance.create_surface(window.clone()) {
@@ -80,7 +80,7 @@ impl Renderer {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
-        let present_mode = choose_present_mode(&caps.present_modes);
+        let present_mode = choose_present_mode(&caps.present_modes, uncapped);
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -166,24 +166,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prefers_immediate_when_available() {
+    fn prefers_fifo_by_default_when_available() {
+        let supported = [
+            wgpu::PresentMode::Immediate,
+            wgpu::PresentMode::Mailbox,
+            wgpu::PresentMode::Fifo,
+        ];
+        assert_eq!(choose_present_mode(&supported, false), wgpu::PresentMode::Fifo);
+    }
+
+    #[test]
+    fn falls_back_to_mailbox_when_no_fifo_and_capped() {
+        let supported = [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox];
+        assert_eq!(choose_present_mode(&supported, false), wgpu::PresentMode::Mailbox);
+    }
+
+    #[test]
+    fn falls_back_to_immediate_when_only_immediate_supported_and_capped() {
+        let supported = [wgpu::PresentMode::Immediate];
+        assert_eq!(choose_present_mode(&supported, false), wgpu::PresentMode::Immediate);
+    }
+
+    #[test]
+    fn prefers_immediate_when_uncapped() {
         let supported = [
             wgpu::PresentMode::Fifo,
             wgpu::PresentMode::Mailbox,
             wgpu::PresentMode::Immediate,
         ];
-        assert_eq!(choose_present_mode(&supported), wgpu::PresentMode::Immediate);
-    }
-
-    #[test]
-    fn falls_back_to_mailbox_when_no_immediate() {
-        let supported = [wgpu::PresentMode::Fifo, wgpu::PresentMode::Mailbox];
-        assert_eq!(choose_present_mode(&supported), wgpu::PresentMode::Mailbox);
-    }
-
-    #[test]
-    fn falls_back_to_fifo_when_nothing_else_supported() {
-        let supported = [wgpu::PresentMode::Fifo];
-        assert_eq!(choose_present_mode(&supported), wgpu::PresentMode::Fifo);
+        assert_eq!(choose_present_mode(&supported, true), wgpu::PresentMode::Immediate);
     }
 }
