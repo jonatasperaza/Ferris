@@ -620,6 +620,7 @@ version = "0.1.0"
 name = "ferris-layout"
 version = "0.1.0"
 dependencies = [
+ "ferris-css",
  "ferris-dom",
  "ferris-style",
 ]
