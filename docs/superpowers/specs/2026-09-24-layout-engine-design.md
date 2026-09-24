@@ -82,8 +82,9 @@ passadas separadas sobre a árvore.
   pub width: f32, pub height: f32, pub margin: Edges, pub border: Edges,
   pub padding: Edges, pub children: Vec<LayoutBox<'a>> }`, e
   `pub fn layout<'a>(root: &'a StyledNode<'a>, viewport_width: f32,
-  viewport_height: f32) -> LayoutBox<'a>` (mais a função interna
-  recursiva `layout_block`).
+  viewport_height: f32) -> Option<LayoutBox<'a>>` (`None` quando a
+  própria raiz é `display: none` — CSS válido, não deve panicar; mais a
+  função interna recursiva `layout_block`).
 
 ## Componentes
 
@@ -183,6 +184,21 @@ containing_block, is_root: true)`:
 - **Sem `box-sizing: border-box`** — `width`/`height` explícitos
   sempre definem a content box (comportamento `content-box`, o default
   do CSS); a propriedade `box-sizing` não é lida.
+- **Shorthands `margin`/`padding`/`border` não são expandidos em lugar
+  nenhum do pipeline** — CSS real frequentemente usa a forma shorthand
+  (`margin: 10px`, `padding: 16px`, `border: 2px solid black`) em vez
+  das quatro longhands por lado. Nem `ferris-css` (que trata
+  declarações como texto opaco, sem interpretar o nome da propriedade)
+  nem `ferris-layout` (que só lê as longhands: `margin-top`,
+  `padding-left`, `border-top-width`, etc.) expandem essas formas para
+  as propriedades por lado. Na prática, `margin: 10px`/`padding: 16px`/
+  `border: 2px solid black` são silenciosamente ignorados por
+  `resolve_edges` — o box model resultante usa `0px` para esses lados,
+  mesmo que a intenção do autor do CSS fosse clara. Só as formas
+  longhand (`margin-top`, `margin-right`, `margin-bottom`,
+  `margin-left`, os equivalentes de `padding`, e `border-{lado}-width`
+  para largura de borda) têm efeito hoje. Expandir shorthands é escopo
+  de uma peça futura dedicada, ou do `ferris-css`/`ferris-style`.
 
 ## Testes
 

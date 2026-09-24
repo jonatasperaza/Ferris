@@ -45,7 +45,17 @@ struct ContainingBlock {
 /// in `resolved_length_or`.
 fn resolve_edges(style: &HashMap<String, String>, property: &str) -> Edges {
     let side = |suffix: &str| -> f32 {
-        let key = format!("{property}-{suffix}");
+        // `border-{side}` (e.g. `border-top`) is a CSS shorthand combining
+        // width+style+color, not a width value — the actual longhand
+        // property for width alone is `border-{side}-width`. margin/padding
+        // have no such shorthand-vs-longhand split (no separate "implicit
+        // width" longhand distinct from the shorthand), so they keep the
+        // plain `{property}-{side}` key.
+        let key = if property == "border" {
+            format!("border-{suffix}-width")
+        } else {
+            format!("{property}-{suffix}")
+        };
         let len = parse_length(style.get(&key).map(String::as_str));
         match len {
             Length::Px(n) => n,
@@ -76,20 +86,21 @@ fn resolved_length_or(len: Length, basis: f32, default_if_auto: f32) -> f32 {
 /// Computes the layout tree for `root` against a viewport of
 /// `viewport_width` x `viewport_height`. This is the crate's public entry
 /// point (consumed directly by piece 2.5).
-pub fn layout<'a>(root: &'a StyledNode<'a>, viewport_width: f32, viewport_height: f32) -> LayoutBox<'a> {
+///
+/// Returns `None` when `root` itself is `display: none` — real, valid CSS
+/// (e.g. `html { display: none; }`) can put the whole document in that
+/// state, and this crate never panics on valid input (same philosophy as
+/// `ferris-css`/`ferris-style`). Callers that know their root is never
+/// hidden may `.unwrap()`; callers building a general-purpose consumer
+/// (piece 2.5) should handle `None` as "nothing to paint."
+pub fn layout<'a>(root: &'a StyledNode<'a>, viewport_width: f32, viewport_height: f32) -> Option<LayoutBox<'a>> {
     let containing_block = ContainingBlock {
         content_x: 0.0,
         content_y: 0.0,
         content_width: viewport_width,
         viewport_height,
     };
-    // The root is never display:none in practice (StyledNode's root is the
-    // document element), but layout_block's signature always returns Option for
-    // uniformity — root callers unwrap because a display:none document root would
-    // be a meaningless call in the first place, not a case this crate needs to
-    // handle gracefully.
     layout_block(root, containing_block, true)
-        .expect("root element must not be display:none")
 }
 
 /// Recursively lays out `node` and its children within `containing_block`.
@@ -245,7 +256,7 @@ mod tests {
     fn explicit_px_width_and_height_are_used_directly() {
         let el = Element::new("div");
         let node = leaf_styled_node(&el, &[("width", "100px"), ("height", "50px")]);
-        let root = layout(&node, 800.0, 600.0);
+        let root = layout(&node, 800.0, 600.0).unwrap();
         assert_eq!(root.width, 100.0);
         assert_eq!(root.height, 50.0);
     }
@@ -254,7 +265,7 @@ mod tests {
     fn auto_width_fills_available_containing_block_space() {
         let el = Element::new("div");
         let node = leaf_styled_node(&el, &[]);
-        let root = layout(&node, 800.0, 600.0);
+        let root = layout(&node, 800.0, 600.0).unwrap();
         assert_eq!(root.width, 800.0);
     }
 
@@ -266,13 +277,13 @@ mod tests {
             &[
                 ("margin-left", "10px"),
                 ("margin-right", "10px"),
-                ("border-left", "2px"),
-                ("border-right", "2px"),
+                ("border-left-width", "2px"),
+                ("border-right-width", "2px"),
                 ("padding-left", "5px"),
                 ("padding-right", "5px"),
             ],
         );
-        let root = layout(&node, 800.0, 600.0);
+        let root = layout(&node, 800.0, 600.0).unwrap();
         // 800 - 10 - 10 - 2 - 2 - 5 - 5 = 766
         assert_eq!(root.width, 766.0);
     }
@@ -281,7 +292,7 @@ mod tests {
     fn oversized_margins_clamp_content_width_to_zero_not_negative() {
         let el = Element::new("div");
         let node = leaf_styled_node(&el, &[("margin-left", "500px"), ("margin-right", "500px")]);
-        let root = layout(&node, 800.0, 600.0);
+        let root = layout(&node, 800.0, 600.0).unwrap();
         assert_eq!(root.width, 0.0);
     }
 
@@ -289,7 +300,7 @@ mod tests {
     fn auto_height_with_no_children_is_zero() {
         let el = Element::new("div");
         let node = leaf_styled_node(&el, &[]);
-        let root = layout(&node, 800.0, 600.0);
+        let root = layout(&node, 800.0, 600.0).unwrap();
         assert_eq!(root.height, 0.0);
     }
 
@@ -297,7 +308,7 @@ mod tests {
     fn explicit_negative_height_clamps_to_zero() {
         let el = Element::new("div");
         let node = leaf_styled_node(&el, &[("height", "-20px")]);
-        let root = layout(&node, 800.0, 600.0);
+        let root = layout(&node, 800.0, 600.0).unwrap();
         assert_eq!(root.height, 0.0);
     }
 
@@ -313,7 +324,7 @@ mod tests {
             style: HashMap::new(),
             children: vec![child1, child2],
         };
-        let root = layout(&parent, 800.0, 600.0);
+        let root = layout(&parent, 800.0, 600.0).unwrap();
         // child1 total = 30 + 5 (margin-bottom) = 35; child2 total = 20; sum = 55
         assert_eq!(root.height, 55.0);
     }
@@ -330,7 +341,7 @@ mod tests {
             style: HashMap::new(),
             children: vec![child1, child2],
         };
-        let root = layout(&parent, 800.0, 600.0);
+        let root = layout(&parent, 800.0, 600.0).unwrap();
         assert_eq!(root.children[0].y, 0.0);
         assert_eq!(root.children[1].y, 30.0);
     }
@@ -347,7 +358,7 @@ mod tests {
             style: HashMap::new(),
             children: vec![child1, child2],
         };
-        let root = layout(&parent, 800.0, 600.0);
+        let root = layout(&parent, 800.0, 600.0).unwrap();
         assert_eq!(root.children.len(), 1);
         assert_eq!(root.height, 20.0);
         assert_eq!(root.children[0].y, 0.0);
@@ -373,7 +384,7 @@ mod tests {
             style: HashMap::new(),
             children: vec![hidden_parent, visible_sibling],
         };
-        let root = layout(&root_node, 800.0, 600.0);
+        let root = layout(&root_node, 800.0, 600.0).unwrap();
         assert_eq!(root.children.len(), 1, "only the visible sibling should remain");
         assert_eq!(root.height, 10.0, "the display:none subtree's 999px must not count at all");
     }
@@ -395,7 +406,7 @@ mod tests {
             style: HashMap::new(),
             children: vec![a, b, c, d],
         };
-        let root = layout(&root_node, 800.0, 600.0);
+        let root = layout(&root_node, 800.0, 600.0).unwrap();
         assert_eq!(root.children.len(), 2);
         assert_eq!(root.children[0].y, 0.0); // a
         assert_eq!(root.children[1].y, 10.0); // c, immediately after a — b contributed 0
@@ -406,7 +417,7 @@ mod tests {
     fn height_percent_resolves_against_viewport_at_root() {
         let el = Element::new("div");
         let node = leaf_styled_node(&el, &[("height", "50%")]);
-        let root = layout(&node, 800.0, 600.0);
+        let root = layout(&node, 800.0, 600.0).unwrap();
         assert_eq!(root.height, 300.0);
     }
 
@@ -416,9 +427,36 @@ mod tests {
         let child = leaf_styled_node(&child_el, &[("height", "50%")]);
         let parent_el = Element::new("div");
         let parent = StyledNode { element: &parent_el, style: HashMap::new(), children: vec![child] };
-        let root = layout(&parent, 800.0, 600.0);
+        let root = layout(&parent, 800.0, 600.0).unwrap();
         // child's height:50% is not root, so it resolves as Auto -> 0 (no children of its own)
         assert_eq!(root.children[0].height, 0.0);
         assert_eq!(root.height, 0.0);
+    }
+
+    // --- I1: layout() must not panic when the root is display:none ---
+    #[test]
+    fn layout_returns_none_when_root_is_display_none() {
+        let el = Element::new("html");
+        let node = leaf_styled_node(&el, &[("display", "none")]);
+        assert!(layout(&node, 800.0, 600.0).is_none());
+    }
+
+    // --- I3: border width must come from the border-{side}-width longhand,
+    // not the border-{side} shorthand ---
+    #[test]
+    fn resolve_edges_border_reads_the_width_longhand() {
+        let style = style_with(&[("border-top-width", "7px")]);
+        let edges = resolve_edges(&style, "border");
+        assert_eq!(edges.top, 7.0);
+    }
+
+    #[test]
+    fn resolve_edges_border_shorthand_alone_does_not_resolve_width() {
+        // `border-top: 4px` is the non-standard/shorthand-only form used
+        // before this fix; it must NOT resolve to a border width anymore
+        // (the fix intentionally changes this behavior).
+        let style = style_with(&[("border-top", "4px")]);
+        let edges = resolve_edges(&style, "border");
+        assert_eq!(edges.top, 0.0);
     }
 }

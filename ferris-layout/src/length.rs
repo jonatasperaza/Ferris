@@ -15,6 +15,17 @@ pub fn parse_length(value: Option<&str>) -> Length {
         return Length::Auto;
     }
 
+    // Real CSS allows a unitless zero (`width: 0` means `0px`) even though
+    // every other unitless number is invalid/ignored. Check this before the
+    // px/% suffix parsing below — it only fires for a bare number (no
+    // suffix), since e.g. "10px".parse::<f32>() fails because of the "px"
+    // suffix, so it never shadows the px/% branches.
+    if let Ok(n) = trimmed.parse::<f32>() {
+        if n == 0.0 {
+            return Length::Px(0.0);
+        }
+    }
+
     if let Some(number_part) = trimmed.strip_suffix("px") {
         if let Ok(n) = number_part.trim().parse::<f32>() {
             return Length::Px(n);
@@ -98,5 +109,23 @@ mod tests {
     #[test]
     fn negative_px_value_parses_as_negative() {
         assert_eq!(parse_length(Some("-5px")), Length::Px(-5.0));
+    }
+
+    // --- I2: a unitless zero is valid CSS and means 0px, unlike any other
+    // unitless number (which stays Auto, per bare_number_with_no_unit_is_auto
+    // above) ---
+    #[test]
+    fn bare_zero_with_no_unit_is_px_zero() {
+        assert_eq!(parse_length(Some("0")), Length::Px(0.0));
+    }
+
+    #[test]
+    fn bare_zero_point_zero_with_no_unit_is_px_zero() {
+        assert_eq!(parse_length(Some("0.0")), Length::Px(0.0));
+    }
+
+    #[test]
+    fn bare_negative_zero_with_no_unit_is_px_zero() {
+        assert_eq!(parse_length(Some("-0")), Length::Px(0.0));
     }
 }

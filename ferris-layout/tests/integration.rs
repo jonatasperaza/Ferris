@@ -66,7 +66,7 @@ fn realistic_page_produces_expected_box_positions_and_sizes() {
     let page = parse_root_element(html);
     let stylesheet = parse_css(css);
     let styled = resolve_styles(&page, &stylesheet);
-    let root = layout(&styled, 1024.0, 768.0);
+    let root = layout(&styled, 1024.0, 768.0).unwrap();
 
     // #page: explicit width 800px, at the viewport origin.
     assert_eq!(root.x, 0.0);
@@ -116,7 +116,7 @@ fn display_none_element_from_real_css_excludes_subtree_end_to_end() {
     let page = parse_root_element(html);
     let stylesheet = parse_css(css);
     let styled = resolve_styles(&page, &stylesheet);
-    let root = layout(&styled, 1024.0, 768.0);
+    let root = layout(&styled, 1024.0, 768.0).unwrap();
 
     assert_eq!(root.children.len(), 1, "hidden-banner and its child must both be excluded");
     assert_eq!(root.children[0].y, 0.0);
@@ -136,7 +136,7 @@ fn height_percent_resolves_only_at_root_through_real_pipeline() {
     let page = parse_root_element(html);
     let stylesheet = parse_css(css);
     let styled = resolve_styles(&page, &stylesheet);
-    let root = layout(&styled, 1024.0, 800.0);
+    let root = layout(&styled, 1024.0, 800.0).unwrap();
 
     assert_eq!(root.height, 400.0, "root height:50% resolves against the 800px viewport");
     // #child's height:50% is not the root, so it resolves to Auto (sum of its
