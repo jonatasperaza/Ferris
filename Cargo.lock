@@ -630,6 +630,7 @@ name = "ferris-paint"
 version = "0.1.0"
 dependencies = [
  "ferris-compositor",
+ "ferris-css",
  "ferris-dom",
  "ferris-layout",
  "ferris-style",
