@@ -617,6 +617,14 @@ name = "ferris-dom"
 version = "0.1.0"
 
 [[package]]
+name = "ferris-layout"
+version = "0.1.0"
+dependencies = [
+ "ferris-dom",
+ "ferris-style",
+]
+
+[[package]]
 name = "ferris-style"
 version = "0.1.0"
 dependencies = [
