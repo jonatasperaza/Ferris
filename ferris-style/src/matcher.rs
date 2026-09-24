@@ -39,10 +39,18 @@ pub fn element_matches_simple(element: &Element, simple: &SimpleSelector) -> boo
     true
 }
 
+/// `ancestors` carries, for each ancestor of `element` (ordered from the furthest,
+/// i.e. the root, to the nearest, i.e. the immediate parent — same order the
+/// original `&[&Element]` used), a pair of `(ancestor, ancestor_preceding_siblings)`
+/// where `ancestor_preceding_siblings` is that ancestor's own list of preceding
+/// `Element` siblings within ITS parent. This lets sibling combinators (`+`/`~`)
+/// resolve correctly even when they apply to an ancestor rather than to `element`
+/// itself (e.g. `.a + .b .f`, where `.b` — an ancestor of the target `.f` — must be
+/// checked against its OWN preceding sibling, not the target's).
 pub fn selector_matches(
     selector: &Selector,
     element: &Element,
-    ancestors: &[&Element],
+    ancestors: &[(&Element, &[&Element])],
     preceding_siblings: &[&Element],
 ) -> bool {
     let components = &selector.components;
@@ -56,7 +64,7 @@ fn matches_from(
     components: &[SelectorComponent],
     idx: usize,
     element: &Element,
-    ancestors: &[&Element],
+    ancestors: &[(&Element, &[&Element])],
     preceding_siblings: &[&Element],
 ) -> bool {
     let SelectorComponent::Simple(simple) = &components[idx] else {
@@ -82,15 +90,15 @@ fn matches_from(
 
     match combinator {
         Combinator::Child => {
-            let Some(&parent) = ancestors.last() else { return false };
+            let Some(&(parent, parent_preceding_siblings)) = ancestors.last() else { return false };
             let parent_ancestors = &ancestors[..ancestors.len() - 1];
-            matches_from(components, prev_idx, parent, parent_ancestors, &[])
+            matches_from(components, prev_idx, parent, parent_ancestors, parent_preceding_siblings)
         }
         Combinator::Descendant => {
             for i in (0..ancestors.len()).rev() {
-                let ancestor = ancestors[i];
+                let (ancestor, ancestor_preceding_siblings) = ancestors[i];
                 let ancestor_ancestors = &ancestors[..i];
-                if matches_from(components, prev_idx, ancestor, ancestor_ancestors, &[]) {
+                if matches_from(components, prev_idx, ancestor, ancestor_ancestors, ancestor_preceding_siblings) {
                     return true;
                 }
             }
@@ -257,12 +265,12 @@ mod tests {
         let matching = Selector {
             components: vec![simple_selector("section"), SelectorComponent::Combinator(Combinator::Descendant), simple_selector("p")],
         };
-        assert!(selector_matches(&matching, &el, &[&grandparent, &parent], &[]));
+        assert!(selector_matches(&matching, &el, &[(&grandparent, &[]), (&parent, &[])], &[]));
 
         let non_matching = Selector {
             components: vec![simple_selector("article"), SelectorComponent::Combinator(Combinator::Descendant), simple_selector("p")],
         };
-        assert!(!selector_matches(&non_matching, &el, &[&grandparent, &parent], &[]));
+        assert!(!selector_matches(&non_matching, &el, &[(&grandparent, &[]), (&parent, &[])], &[]));
     }
 
     #[test]
@@ -273,13 +281,13 @@ mod tests {
         let matching = Selector {
             components: vec![simple_selector("div"), SelectorComponent::Combinator(Combinator::Child), simple_selector("p")],
         };
-        assert!(selector_matches(&matching, &el, &[&grandparent, &parent], &[]));
+        assert!(selector_matches(&matching, &el, &[(&grandparent, &[]), (&parent, &[])], &[]));
 
         let non_matching = Selector {
             components: vec![simple_selector("section"), SelectorComponent::Combinator(Combinator::Child), simple_selector("p")],
         };
         assert!(
-            !selector_matches(&non_matching, &el, &[&grandparent, &parent], &[]),
+            !selector_matches(&non_matching, &el, &[(&grandparent, &[]), (&parent, &[])], &[]),
             "section is a grandparent, not the immediate parent"
         );
     }
@@ -331,5 +339,51 @@ mod tests {
             components: vec![simple_selector("h1"), SelectorComponent::Combinator(Combinator::NextSibling), simple_selector("p")],
         };
         assert!(!selector_matches(&sibling_selector, &el, &[], &[]));
+    }
+
+    // --- Review Focus (I-1 fix): sibling combinator to the LEFT of an ancestor
+    // combinator must be checked against that ANCESTOR's own preceding siblings,
+    // not the target element's. Reproduces `.a + .b .f` against:
+    //   <div id="wrap">
+    //     <section class="a" id="s1">...</section>
+    //     <section class="b" id="s2"><div class="inner"><p class="f" id="p4"/></div></section>
+    //   </div>
+    // `.f` (p4) is a descendant of `.b` (section#s2), and `.b` is the next sibling
+    // of `.a` (section#s1) within `#wrap`. Before the fix, the recursive call for
+    // the `Descendant` combinator always passed `preceding_siblings: &[]` for the
+    // ancestor being checked, so `.a + .b` could never match here.
+    #[test]
+    fn sibling_combinator_before_ancestor_combinator_carries_correct_per_ancestor_siblings() {
+        let wrap = element("div", &[("id", "wrap")]);
+        let section_a = element("section", &[("class", "a"), ("id", "s1")]);
+        let section_b = element("section", &[("class", "b"), ("id", "s2")]);
+        let target = element("p", &[("class", "f"), ("id", "p4")]);
+
+        let selector = Selector {
+            components: vec![
+                SelectorComponent::Simple(SimpleSelector { classes: vec!["a".to_string()], ..Default::default() }),
+                SelectorComponent::Combinator(Combinator::NextSibling),
+                SelectorComponent::Simple(SimpleSelector { classes: vec!["b".to_string()], ..Default::default() }),
+                SelectorComponent::Combinator(Combinator::Descendant),
+                SelectorComponent::Simple(SimpleSelector { classes: vec!["f".to_string()], ..Default::default() }),
+            ],
+        };
+
+        // `target` (p.f)'s immediate parent is section.b (its "inner" div is elided
+        // here; the fix cares about ancestors carrying per-level sibling context,
+        // regardless of chain depth). Ancestors are ordered furthest (root) to
+        // nearest (immediate parent), same as before the fix.
+        let section_b_preceding_siblings = [&section_a];
+        let ancestors: Vec<(&Element, &[&Element])> =
+            vec![(&wrap, &[] as &[&Element]), (&section_b, &section_b_preceding_siblings)];
+        assert!(
+            selector_matches(&selector, &target, &ancestors, &[]),
+            ".a + .b .f must match: section.b is the next sibling of section.a, and p.f is a descendant of section.b"
+        );
+
+        // Sanity check: without section.a recorded as section.b's preceding sibling,
+        // the sibling combinator correctly fails to match.
+        let ancestors_no_sibling: Vec<(&Element, &[&Element])> = vec![(&wrap, &[]), (&section_b, &[])];
+        assert!(!selector_matches(&selector, &target, &ancestors_no_sibling, &[]));
     }
 }

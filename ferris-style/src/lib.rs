@@ -24,7 +24,7 @@ pub fn resolve_styles<'a>(root: &'a Element, stylesheet: &Stylesheet) -> StyledN
 fn resolve_node<'a>(
     element: &'a Element,
     stylesheet: &Stylesheet,
-    ancestors: &[&'a Element],
+    ancestors: &[(&'a Element, &[&'a Element])],
     preceding_siblings: &[&'a Element],
 ) -> StyledNode<'a> {
     let mut matched: Vec<MatchedDeclaration> = Vec::new();
@@ -65,8 +65,8 @@ fn resolve_node<'a>(
         })
         .collect();
 
-    let mut new_ancestors: Vec<&'a Element> = ancestors.to_vec();
-    new_ancestors.push(element);
+    let mut new_ancestors: Vec<(&'a Element, &[&'a Element])> = ancestors.to_vec();
+    new_ancestors.push((element, preceding_siblings));
 
     let mut children = Vec::new();
     for (i, &child) in child_elements.iter().enumerate() {
