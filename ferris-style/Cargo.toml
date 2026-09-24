@@ -1,0 +1,8 @@
+[package]
+name = "ferris-style"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ferris-dom = { path = "../ferris-dom" }
+ferris-css = { path = "../ferris-css" }

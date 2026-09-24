@@ -617,6 +617,14 @@ name = "ferris-dom"
 version = "0.1.0"
 
 [[package]]
+name = "ferris-style"
+version = "0.1.0"
+dependencies = [
+ "ferris-css",
+ "ferris-dom",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
