@@ -14,7 +14,10 @@ const VOID_ELEMENTS: &[&str] = &[
 ];
 
 fn is_void_element(name: &str) -> bool {
-    VOID_ELEMENTS.contains(&name.to_ascii_lowercase().as_str())
+    // Tag names are lowercased at extraction time (see `parse_tag_content` and
+    // the `TagClose` handling in `Tokenizer::tokenize`), so `name` is already
+    // lowercase here.
+    VOID_ELEMENTS.contains(&name)
 }
 
 fn find_tag_end(chars: &[char], start: usize) -> usize {
@@ -55,6 +58,10 @@ fn parse_tag_content(content: &str) -> (String, HashMap<String, String>) {
         name.push(c);
         chars.next();
     }
+    // Tag names are normalized to lowercase to match real browser behavior
+    // and so downstream consumers (e.g. CSS selector matching) can rely on
+    // `tag_name` always being lowercase.
+    let name = name.to_ascii_lowercase();
 
     let mut attributes = HashMap::new();
     loop {
@@ -80,6 +87,9 @@ fn parse_tag_content(content: &str) -> (String, HashMap<String, String>) {
         if attr_name.is_empty() {
             break;
         }
+        // Attribute names are normalized to lowercase (values are left as-is,
+        // since attribute values are case-sensitive/arbitrary).
+        let attr_name = attr_name.to_ascii_lowercase();
 
         while let Some(&c) = chars.peek() {
             if c.is_whitespace() {
@@ -139,12 +149,26 @@ impl Tokenizer {
 
         while i < chars.len() {
             if chars[i] == '<' {
+                let is_comment_start = chars[i..].starts_with(&['<', '!', '-', '-']);
+                let is_closing_tag_start = i + 2 < chars.len()
+                    && chars[i + 1] == '/'
+                    && chars[i + 2].is_ascii_alphabetic();
+                let is_opening_tag_start = i + 1 < chars.len() && chars[i + 1].is_ascii_alphabetic();
+
+                if !(is_comment_start || is_closing_tag_start || is_opening_tag_start) {
+                    // `<` not followed by `!--`, `/<letter>`, or `<letter>` is not the
+                    // start of markup (e.g. `1 < 2`) — treat it as literal text.
+                    text_buf.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+
                 if !text_buf.is_empty() {
                     tokens.push(Token::Text(text_buf.clone()));
                     text_buf.clear();
                 }
 
-                if chars[i..].starts_with(&['<', '!', '-', '-']) {
+                if is_comment_start {
                     let start = i + 4;
                     if let Some(end) = find_sequence(&chars, start, &['-', '-', '>']) {
                         let comment_text: String = chars[start..end].iter().collect();
@@ -158,26 +182,34 @@ impl Tokenizer {
                     continue;
                 }
 
-                if i + 1 < chars.len() && chars[i + 1] == '/' {
+                if is_closing_tag_start {
                     let start = i + 2;
                     let end = find_tag_end(&chars, start);
-                    let name: String = chars[start..end].iter().collect::<String>().trim().to_string();
+                    let name: String = chars[start..end]
+                        .iter()
+                        .collect::<String>()
+                        .trim()
+                        .to_ascii_lowercase();
                     tokens.push(Token::TagClose { name });
                     i = if end < chars.len() { end + 1 } else { end };
                     continue;
                 }
 
-                let end = find_tag_end(&chars, i + 1);
-                let mut tag_content: String = chars[i + 1..end].iter().collect();
-                let explicit_slash = tag_content.trim_end().ends_with('/');
-                if explicit_slash {
-                    tag_content = tag_content.trim_end().trim_end_matches('/').to_string();
+                if is_opening_tag_start {
+                    let end = find_tag_end(&chars, i + 1);
+                    let mut tag_content: String = chars[i + 1..end].iter().collect();
+                    let explicit_slash = tag_content.trim_end().ends_with('/');
+                    if explicit_slash {
+                        tag_content = tag_content.trim_end().trim_end_matches('/').to_string();
+                    }
+                    let (name, attributes) = parse_tag_content(&tag_content);
+                    let self_closing = explicit_slash || is_void_element(&name);
+                    tokens.push(Token::TagOpen { name, attributes, self_closing });
+                    i = if end < chars.len() { end + 1 } else { end };
+                    continue;
                 }
-                let (name, attributes) = parse_tag_content(&tag_content);
-                let self_closing = explicit_slash || is_void_element(&name);
-                tokens.push(Token::TagOpen { name, attributes, self_closing });
-                i = if end < chars.len() { end + 1 } else { end };
-                continue;
+
+                unreachable!("is_comment_start, is_closing_tag_start, and is_opening_tag_start were all false, which is handled above");
             }
 
             text_buf.push(chars[i]);
@@ -276,11 +308,18 @@ mod tests {
         let upper = Tokenizer::tokenize("<BR>");
         match &upper[0] {
             Token::TagOpen { name, self_closing, .. } => {
-                assert_eq!(name, "BR", "tag name is preserved as-written, not lowercased");
+                assert_eq!(name, "br", "tag name is normalized to lowercase");
                 assert!(self_closing, "void-element check must match case-insensitively");
             }
             other => panic!("expected TagOpen, got {other:?}"),
         }
+    }
+
+    // --- Review Focus: stray '<' not starting markup stays literal text ---
+    #[test]
+    fn stray_less_than_not_followed_by_markup_is_literal_text() {
+        let tokens = Tokenizer::tokenize("1 < 2");
+        assert_eq!(tokens, vec![Token::Text("1 < 2".to_string())]);
     }
 
     // --- Review Focus: text immediately adjacent to a tag with no whitespace ---
