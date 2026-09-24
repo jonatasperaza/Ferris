@@ -1,0 +1,8 @@
+[package]
+name = "ferris-paint"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ferris-layout = { path = "../ferris-layout" }
+ferris-compositor = { path = "../ferris-compositor" }
