@@ -1,3 +1,3 @@
 [workspace]
-members = ["ferris-compositor", "ferris-dom"]
+members = ["ferris-compositor", "ferris-dom", "ferris-css"]
 resolver = "2"
