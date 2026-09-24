@@ -18,7 +18,7 @@ impl Parser {
             let rule_start = i;
 
             if let Some(Token::AtKeyword(name)) = tokens.get(i) {
-                if name == "media" {
+                if name.eq_ignore_ascii_case("media") {
                     i += 1;
                     skip_whitespace(tokens, &mut i);
                     let condition_start = i;
@@ -42,7 +42,7 @@ impl Parser {
                                 i = next;
                             }
                             None => {
-                                i = skip_to_next_boundary(tokens, nested_start);
+                                i = skip_to_next_boundary(tokens, nested_start, true);
                             }
                         }
                     }
@@ -52,8 +52,9 @@ impl Parser {
                     rules.push(Rule::Media(MediaRule { condition, rules: media_rules }));
                     continue;
                 } else {
-                    // Unknown at-rule: out of scope, skip just the keyword and move on.
-                    i += 1;
+                    // Unknown at-rule: skip its entire body (prelude up to ';' or a balanced
+                    // '{ ... }' block), per the CSS spec's recovery rule for unknown at-rules.
+                    i = skip_unknown_at_rule(tokens, i + 1);
                     continue;
                 }
             }
@@ -64,7 +65,7 @@ impl Parser {
                     i = next;
                 }
                 None => {
-                    i = skip_to_next_boundary(tokens, rule_start);
+                    i = skip_to_next_boundary(tokens, rule_start, false);
                 }
             }
         }
@@ -86,7 +87,7 @@ fn is_simple_selector_start(tokens: &[Token], i: usize) -> bool {
 }
 
 fn parse_style_rule(tokens: &[Token], mut i: usize) -> Option<(StyleRule, usize)> {
-    let (selectors, next) = parse_selector_list(tokens, i);
+    let (selectors, next) = parse_selector_list(tokens, i)?;
     i = next;
     skip_whitespace(tokens, &mut i);
     if tokens.get(i) != Some(&Token::OpenBrace) {
@@ -107,31 +108,54 @@ fn parse_style_rule(tokens: &[Token], mut i: usize) -> Option<(StyleRule, usize)
 /// at this level — or `tokens.len()` if no such closing brace exists before the end of
 /// input. This is the spec's "malformed rule dropped whole, resume at the next boundary"
 /// error-recovery rule.
-fn skip_to_next_boundary(tokens: &[Token], start: usize) -> usize {
+fn skip_to_next_boundary(tokens: &[Token], start: usize, stop_before_enclosing_close: bool) -> usize {
     let mut i = start;
     let mut depth: i32 = 0;
     while i < tokens.len() {
         match tokens[i] {
-            Token::OpenBrace => depth += 1,
+            Token::OpenBrace => {
+                depth += 1;
+                i += 1;
+            }
             Token::CloseBrace => {
+                if depth == 0 {
+                    if stop_before_enclosing_close {
+                        return i;
+                    }
+                    return i + 1;
+                }
                 depth -= 1;
                 i += 1;
-                if depth <= 0 {
+                if depth == 0 {
                     return i;
                 }
-                continue;
             }
-            _ => {}
+            _ => {
+                i += 1;
+            }
         }
-        i += 1;
     }
     i
 }
 
-fn parse_selector_list(tokens: &[Token], mut i: usize) -> (Vec<Selector>, usize) {
+/// Skips an unknown/unrecognized at-rule's entire body: everything up to and including
+/// either the first top-level `;`, or a balanced `{ ... }` block, whichever comes first.
+/// This is the CSS specification's own error-recovery rule for unrecognized at-rules.
+fn skip_unknown_at_rule(tokens: &[Token], mut i: usize) -> usize {
+    while i < tokens.len() {
+        match tokens[i] {
+            Token::Semicolon => return i + 1,
+            Token::OpenBrace => return skip_to_next_boundary(tokens, i, false),
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+fn parse_selector_list(tokens: &[Token], mut i: usize) -> Option<(Vec<Selector>, usize)> {
     let mut selectors = Vec::new();
     loop {
-        let (selector, next) = parse_selector(tokens, i);
+        let (selector, next) = parse_selector(tokens, i)?;
         selectors.push(selector);
         i = next;
         skip_whitespace(tokens, &mut i);
@@ -142,12 +166,15 @@ fn parse_selector_list(tokens: &[Token], mut i: usize) -> (Vec<Selector>, usize)
             break;
         }
     }
-    (selectors, i)
+    Some((selectors, i))
 }
 
-fn parse_selector(tokens: &[Token], mut i: usize) -> (Selector, usize) {
+fn parse_selector(tokens: &[Token], mut i: usize) -> Option<(Selector, usize)> {
     let mut components = Vec::new();
     skip_whitespace(tokens, &mut i);
+    if !is_simple_selector_start(tokens, i) {
+        return None;
+    }
     let (simple, next) = parse_simple_selector(tokens, i);
     components.push(SelectorComponent::Simple(simple));
     i = next;
@@ -190,14 +217,14 @@ fn parse_selector(tokens: &[Token], mut i: usize) -> (Selector, usize) {
         break;
     }
 
-    (Selector { components }, i)
+    Some((Selector { components }, i))
 }
 
 fn parse_simple_selector(tokens: &[Token], mut i: usize) -> (SimpleSelector, usize) {
     let mut selector = SimpleSelector::default();
 
     if let Some(Token::Ident(name)) = tokens.get(i) {
-        selector.type_name = Some(name.clone());
+        selector.type_name = Some(name.to_ascii_lowercase());
         i += 1;
     }
 
@@ -234,7 +261,7 @@ fn parse_simple_selector(tokens: &[Token], mut i: usize) -> (SimpleSelector, usi
                         }
                     }
                     if tokens.get(j) == Some(&Token::Delim(']')) {
-                        selector.attributes.push(AttributeSelector { name: attr_name.clone(), value });
+                        selector.attributes.push(AttributeSelector { name: attr_name.to_ascii_lowercase(), value });
                         i = j + 1;
                     } else {
                         break;
@@ -259,7 +286,7 @@ fn parse_declarations(tokens: &[Token], mut i: usize) -> (Vec<Declaration>, usiz
         }
         let property = if let Some(Token::Ident(name)) = tokens.get(i) {
             i += 1;
-            name.clone()
+            name.to_ascii_lowercase()
         } else {
             break;
         };
@@ -477,5 +504,83 @@ mod tests {
         }).collect();
         assert_eq!(style_rules.len(), 1, "expected only the well-formed p rule to survive");
         assert_eq!(style_rules[0].declarations, vec![Declaration { property: "color".to_string(), value: "blue".to_string() }]);
+    }
+
+    #[test]
+    fn rule_with_no_selector_at_all_is_dropped() {
+        let sheet = Parser::parse(&tokens_for("{ color: red }"));
+        assert!(sheet.rules.is_empty());
+    }
+
+    #[test]
+    fn trailing_comma_with_empty_selector_drops_the_whole_rule() {
+        let sheet = Parser::parse(&tokens_for("div, { color: blue }"));
+        assert!(sheet.rules.is_empty());
+    }
+
+    #[test]
+    fn leading_comma_with_empty_selector_drops_the_whole_rule() {
+        let sheet = Parser::parse(&tokens_for(", p {}"));
+        assert!(sheet.rules.is_empty());
+    }
+
+    #[test]
+    fn leading_combinator_with_no_preceding_selector_drops_the_rule() {
+        let sheet = Parser::parse(&tokens_for("> p {}"));
+        assert!(sheet.rules.is_empty());
+    }
+
+    #[test]
+    fn malformed_content_inside_media_does_not_absorb_the_media_blocks_own_close_brace() {
+        let tokens = tokens_for("@media print { p { a: b } ; } body { color: blue; }");
+        let sheet = Parser::parse(&tokens);
+        let media_count = sheet.rules.iter().filter(|r| matches!(r, Rule::Media(_))).count();
+        let style_count = sheet.rules.iter().filter(|r| matches!(r, Rule::Style(_))).count();
+        assert_eq!(media_count, 1, "expected exactly one @media rule");
+        assert_eq!(style_count, 1, "expected 'body' to be a top-level rule, not absorbed into @media");
+        let Some(Rule::Media(media)) = sheet.rules.iter().find(|r| matches!(r, Rule::Media(_))) else { unreachable!() };
+        assert_eq!(media.rules.len(), 1, "expected only 'p' inside the media block");
+    }
+
+    #[test]
+    fn statement_at_rule_charset_does_not_delete_the_following_rule() {
+        let tokens = tokens_for(r#"@charset "UTF-8"; body { color: red; } p { color: blue; }"#);
+        let sheet = Parser::parse(&tokens);
+        let style_rules: Vec<&StyleRule> = sheet.rules.iter().filter_map(|r| match r {
+            Rule::Style(s) => Some(s),
+            Rule::Media(_) => None,
+        }).collect();
+        assert_eq!(style_rules.len(), 2, "expected both body and p to survive @charset");
+    }
+
+    #[test]
+    fn unknown_block_at_rule_is_skipped_as_a_whole_without_becoming_a_style_rule() {
+        let tokens = tokens_for("@font-face { font-family: Foo; src: url(foo.woff); } p { color: red; }");
+        let sheet = Parser::parse(&tokens);
+        assert_eq!(sheet.rules.len(), 1, "expected only the p rule; @font-face should produce no Rule at all");
+        let Rule::Style(p) = &sheet.rules[0] else { panic!("expected a style rule") };
+        assert_eq!(p.declarations[0].value, "red");
+    }
+
+    #[test]
+    fn type_name_attribute_name_and_property_are_lowercased_classes_and_ids_are_not() {
+        let tokens = tokens_for("DIV.Foo#Bar[Data-X=1] { COLOR: red; }");
+        let sheet = Parser::parse(&tokens);
+        let Rule::Style(rule) = &sheet.rules[0] else { panic!("expected style rule") };
+        let SelectorComponent::Simple(simple) = &rule.selectors[0].components[0] else { panic!("expected simple selector") };
+        assert_eq!(simple.type_name, Some("div".to_string()), "type name should be lowercased");
+        assert_eq!(simple.classes, vec!["Foo".to_string()], "class name must NOT be lowercased");
+        assert_eq!(simple.id, Some("Bar".to_string()), "id must NOT be lowercased");
+        assert_eq!(simple.attributes[0].name, "data-x", "attribute name should be lowercased");
+        assert_eq!(rule.declarations[0].property, "color", "property should be lowercased");
+        assert_eq!(rule.declarations[0].value, "red", "value case is preserved as-is (lowercase here just by coincidence of the input)");
+    }
+
+    #[test]
+    fn media_keyword_matches_case_insensitively() {
+        let tokens = tokens_for("@MEDIA print { p { color: red; } }");
+        let sheet = Parser::parse(&tokens);
+        assert_eq!(sheet.rules.len(), 1);
+        assert!(matches!(sheet.rules[0], Rule::Media(_)), "uppercase @MEDIA must still be recognized as a media rule");
     }
 }

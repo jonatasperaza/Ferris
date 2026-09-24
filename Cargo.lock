@@ -609,6 +609,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferris-css"
+version = "0.1.0"
+
+[[package]]
 name = "ferris-dom"
 version = "0.1.0"
 
