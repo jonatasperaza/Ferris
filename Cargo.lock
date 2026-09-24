@@ -626,6 +626,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferris-paint"
+version = "0.1.0"
+dependencies = [
+ "ferris-compositor",
+ "ferris-dom",
+ "ferris-layout",
+ "ferris-style",
+]
+
+[[package]]
 name = "ferris-style"
 version = "0.1.0"
 dependencies = [
