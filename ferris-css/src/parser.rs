@@ -1,5 +1,5 @@
 use crate::stylesheet::{
-    AttributeSelector, Combinator, Declaration, Rule, Selector, SelectorComponent,
+    AttributeSelector, Combinator, Declaration, MediaRule, Rule, Selector, SelectorComponent,
     SimpleSelector, StyleRule, Stylesheet,
 };
 use crate::tokenizer::Token;
@@ -15,9 +15,58 @@ impl Parser {
             if i >= tokens.len() {
                 break;
             }
-            let (rule, next) = parse_style_rule(tokens, i);
-            rules.push(Rule::Style(rule));
-            i = next;
+            let rule_start = i;
+
+            if let Some(Token::AtKeyword(name)) = tokens.get(i) {
+                if name == "media" {
+                    i += 1;
+                    skip_whitespace(tokens, &mut i);
+                    let condition_start = i;
+                    while i < tokens.len() && tokens[i] != Token::OpenBrace {
+                        i += 1;
+                    }
+                    let condition = reconstruct_value(&tokens[condition_start..i]);
+                    if i < tokens.len() {
+                        i += 1; // consume {
+                    }
+                    let mut media_rules = Vec::new();
+                    loop {
+                        skip_whitespace(tokens, &mut i);
+                        if i >= tokens.len() || tokens[i] == Token::CloseBrace {
+                            break;
+                        }
+                        let nested_start = i;
+                        match parse_style_rule(tokens, i) {
+                            Some((rule, next)) => {
+                                media_rules.push(rule);
+                                i = next;
+                            }
+                            None => {
+                                i = skip_to_next_boundary(tokens, nested_start);
+                            }
+                        }
+                    }
+                    if i < tokens.len() && tokens[i] == Token::CloseBrace {
+                        i += 1; // consume outer }
+                    }
+                    rules.push(Rule::Media(MediaRule { condition, rules: media_rules }));
+                    continue;
+                } else {
+                    // Unknown at-rule: out of scope, skip just the keyword and move on.
+                    i += 1;
+                    continue;
+                }
+            }
+
+            match parse_style_rule(tokens, i) {
+                Some((rule, next)) => {
+                    rules.push(Rule::Style(rule));
+                    i = next;
+                }
+                None => {
+                    i = skip_to_next_boundary(tokens, rule_start);
+                }
+            }
         }
         Stylesheet { rules }
     }
@@ -36,19 +85,47 @@ fn is_simple_selector_start(tokens: &[Token], i: usize) -> bool {
     )
 }
 
-fn parse_style_rule(tokens: &[Token], mut i: usize) -> (StyleRule, usize) {
+fn parse_style_rule(tokens: &[Token], mut i: usize) -> Option<(StyleRule, usize)> {
     let (selectors, next) = parse_selector_list(tokens, i);
     i = next;
     skip_whitespace(tokens, &mut i);
-    // Task 4 assumes an OpenBrace is here (well-formed input only);
-    // Task 5 replaces this function to check and handle malformed input.
-    i += 1; // consume {
+    if tokens.get(i) != Some(&Token::OpenBrace) {
+        return None;
+    }
+    i += 1;
     let (declarations, next) = parse_declarations(tokens, i);
     i = next;
-    if tokens.get(i) == Some(&Token::CloseBrace) {
+    if tokens.get(i) != Some(&Token::CloseBrace) {
+        return None;
+    }
+    i += 1;
+    Some((StyleRule { selectors, declarations }, i))
+}
+
+/// Scans forward from `start` (the beginning of a rule that failed to parse), tracking
+/// brace depth, and returns the index just past the `}` that closes the first `{` opened
+/// at this level — or `tokens.len()` if no such closing brace exists before the end of
+/// input. This is the spec's "malformed rule dropped whole, resume at the next boundary"
+/// error-recovery rule.
+fn skip_to_next_boundary(tokens: &[Token], start: usize) -> usize {
+    let mut i = start;
+    let mut depth: i32 = 0;
+    while i < tokens.len() {
+        match tokens[i] {
+            Token::OpenBrace => depth += 1,
+            Token::CloseBrace => {
+                depth -= 1;
+                i += 1;
+                if depth <= 0 {
+                    return i;
+                }
+                continue;
+            }
+            _ => {}
+        }
         i += 1;
     }
-    (StyleRule { selectors, declarations }, i)
+    i
 }
 
 fn parse_selector_list(tokens: &[Token], mut i: usize) -> (Vec<Selector>, usize) {
@@ -375,5 +452,30 @@ mod tests {
     fn empty_input_yields_empty_stylesheet() {
         assert_eq!(Parser::parse(&tokens_for("")), Stylesheet::default());
         assert_eq!(Parser::parse(&tokens_for("   \n  ")), Stylesheet::default());
+    }
+
+    #[test]
+    fn parses_media_rule_with_nested_style_rules() {
+        let tokens = tokens_for("@media (min-width: 600px) { p { color: red; } }");
+        let sheet = Parser::parse(&tokens);
+        assert_eq!(sheet.rules.len(), 1);
+        let Rule::Media(media) = &sheet.rules[0] else { panic!("expected media rule") };
+        assert_eq!(media.condition, "(min-width: 600px)");
+        assert_eq!(media.rules.len(), 1);
+        assert_eq!(media.rules[0].declarations[0].value, "red");
+    }
+
+    #[test]
+    fn malformed_rule_is_skipped_without_breaking_the_rest_of_the_sheet() {
+        // "div { color red; }" is missing the ':' after "color" — malformed.
+        // The parser must drop it whole and still parse the well-formed "p" rule that follows.
+        let tokens = tokens_for("div { color red; } p { color: blue; }");
+        let sheet = Parser::parse(&tokens);
+        let style_rules: Vec<&StyleRule> = sheet.rules.iter().filter_map(|r| match r {
+            Rule::Style(s) => Some(s),
+            Rule::Media(_) => None,
+        }).collect();
+        assert_eq!(style_rules.len(), 1, "expected only the well-formed p rule to survive");
+        assert_eq!(style_rules[0].declarations, vec![Declaration { property: "color".to_string(), value: "blue".to_string() }]);
     }
 }
