@@ -1,5 +1,5 @@
 use crate::dom::{Element, Node};
-use crate::tokenizer::Token;
+use crate::tokenizer::{Token, Tokenizer};
 
 pub struct Parser;
 
@@ -42,6 +42,25 @@ impl Parser {
 
         Node::Element(stack.pop().unwrap())
     }
+}
+
+/// Tokenizes and parses `html`, then unwraps the synthetic "document" root
+/// `Parser::parse` always wraps everything in, returning the first real
+/// element found — or an empty `<html>` element if there is none (empty
+/// input, or input with only free text and no tags). Never panics.
+pub fn parse_document(html: &str) -> Element {
+    let tokens = Tokenizer::tokenize(html);
+    let Node::Element(document) = Parser::parse(&tokens) else {
+        return Element::new("html");
+    };
+    document
+        .children
+        .into_iter()
+        .find_map(|child| match child {
+            Node::Element(el) => Some(el),
+            Node::Text(_) | Node::Comment(_) => None,
+        })
+        .unwrap_or_else(|| Element::new("html"))
 }
 
 #[cfg(test)]
@@ -125,5 +144,25 @@ mod tests {
         let Node::Element(doc) = Parser::parse(&tokens) else { panic!("expected document element") };
         assert_eq!(doc.tag_name, "document");
         assert!(doc.children.is_empty());
+    }
+
+    #[test]
+    fn parse_document_returns_the_first_real_element() {
+        let root = parse_document("<div>hello</div>");
+        assert_eq!(root.tag_name, "div");
+    }
+
+    #[test]
+    fn parse_document_on_empty_input_returns_empty_html_element() {
+        let root = parse_document("");
+        assert_eq!(root.tag_name, "html");
+        assert!(root.children.is_empty());
+    }
+
+    #[test]
+    fn parse_document_on_text_only_input_does_not_panic() {
+        let root = parse_document("just some free text, no tags at all");
+        assert_eq!(root.tag_name, "html");
+        assert!(root.children.is_empty());
     }
 }
