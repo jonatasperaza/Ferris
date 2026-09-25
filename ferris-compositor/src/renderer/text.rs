@@ -37,7 +37,19 @@ impl TextLayer {
         for cmd in texts {
             let mut buffer = GlyphonBuffer::new(&mut self.font_system, Metrics::new(cmd.size, cmd.size * 1.2));
             buffer.set_text(&mut self.font_system, &cmd.content, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
-            buffer.set_size(&mut self.font_system, Some(width as f32), Some(height as f32));
+            // Each `cmd.content` is already a single, final line: ferris-layout
+            // pre-wrapped the paragraph into per-line TextCommands, each with
+            // its own stacked y-offset. Bounding this buffer's width to the
+            // surface width (rather than leaving it unbounded) would let
+            // cosmic-text re-wrap a line a second time internally whenever the
+            // window is narrower than the width the line was originally
+            // wrapped against upstream (or once `cmd.size` is scaled up for a
+            // fractional display scale factor) — and because that unintended
+            // second sub-line falls exactly one buffer-internal line-height
+            // below this line's top, it lands squarely on top of the next
+            // TextCommand's own line. No width/height bound is needed here:
+            // this buffer holds exactly one already-wrapped line.
+            buffer.set_size(&mut self.font_system, None, None);
             self.buffers.push(buffer);
         }
 

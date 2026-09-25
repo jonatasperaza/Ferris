@@ -111,3 +111,46 @@ fn unsupported_color_format_produces_no_rect_end_to_end() {
     let has_rect = frame.commands.iter().any(|c| matches!(c, DrawCommand::Rect(_)));
     assert!(!has_rect, "an unparseable background-color must not produce a rect");
 }
+
+// --- Review Focus: real HTML+CSS with a long paragraph in a narrow box must
+// wrap into multiple TextCommands with correctly stacked y-offsets, through
+// the real parser+style+layout+paint pipeline end to end ---
+#[test]
+fn long_paragraph_in_a_narrow_box_wraps_into_multiple_text_commands() {
+    let html = r#"<div id="box"><p id="para">this is a long sentence that should not fit on a single line inside a very narrow box</p></div>"#;
+    let css = r#"
+        #box { width: 100px; }
+        #para { font-size: 16px; }
+    "#;
+
+    let page = parse_root_element(html);
+    let stylesheet = parse_css(css);
+    let styled = resolve_styles(&page, &stylesheet);
+    let layout_box = layout(&styled, 1024.0, 768.0).unwrap();
+    let frame = paint(&layout_box);
+
+    let texts: Vec<_> = frame.commands.iter().filter_map(|c| match c {
+        DrawCommand::Text(t) => Some(t),
+        DrawCommand::Rect(_) => None,
+    }).collect();
+
+    assert!(texts.len() > 1, "expected the long paragraph to wrap into multiple TextCommands, got {}", texts.len());
+
+    // y-offsets must be strictly increasing by exactly one line height between
+    // consecutive lines.
+    let line_h = ferris_text::line_height(16.0);
+    for i in 1..texts.len() {
+        assert!(
+            (texts[i].y - texts[i - 1].y - line_h).abs() < 0.01,
+            "line {} should be exactly one line-height below line {}",
+            i,
+            i - 1
+        );
+    }
+
+    // No word should have been dropped across the wrapped TextCommands.
+    let rejoined: Vec<&str> = texts.iter().flat_map(|t| t.content.split_whitespace()).collect();
+    let original: Vec<&str> =
+        "this is a long sentence that should not fit on a single line inside a very narrow box".split_whitespace().collect();
+    assert_eq!(rejoined, original);
+}
