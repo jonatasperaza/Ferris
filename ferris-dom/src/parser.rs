@@ -185,5 +185,9 @@ mod tests {
         let root = parse_document("<head><title>t</title></head><body><p>hi</p></body>");
         assert_eq!(root.tag_name, "html");
         assert_eq!(root.children.len(), 2);
+        let Node::Element(head) = &root.children[0] else { panic!("expected head element") };
+        assert_eq!(head.tag_name, "head");
+        let Node::Element(body) = &root.children[1] else { panic!("expected body element") };
+        assert_eq!(body.tag_name, "body");
     }
 }
