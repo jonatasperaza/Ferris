@@ -1,0 +1,33 @@
+#page {
+    width: 800px;
+    background-color: white;
+}
+#head {
+    height: 60px;
+    background-color: #003366;
+    color: white;
+    font-size: 28px;
+}
+#content {
+    padding-top: 20px;
+    padding-left: 20px;
+    padding-right: 20px;
+}
+#intro {
+    height: 24px;
+    color: #222222;
+    font-size: 18px;
+}
+#card {
+    margin-top: 16px;
+    padding-top: 16px;
+    padding-bottom: 16px;
+    padding-left: 16px;
+    padding-right: 16px;
+    background-color: #eeeeee;
+}
+#card-text {
+    height: 20px;
+    color: black;
+    font-size: 16px;
+}

@@ -9,13 +9,22 @@ use winit::window::{Window, WindowId};
 
 use renderer::Renderer;
 
+use ferris_css::parser::Parser as CssParser;
+use ferris_css::tokenizer::Tokenizer as CssTokenizer;
+use ferris_dom::dom::Node;
+use ferris_dom::parser::Parser as DomParser;
+use ferris_dom::tokenizer::Tokenizer as DomTokenizer;
+use ferris_layout::layout;
+use ferris_paint::paint::paint;
+use ferris_style::resolve_styles;
+
 struct App {
     window: Option<Arc<Window>>,
     gpu: Option<Renderer>,
-    start: std::time::Instant,
     frame_timer: perf::FrameTimer,
     last_frame_start: Option<std::time::Instant>,
     occluded: bool,
+    page_frame: Option<scene::Frame>,
 }
 
 impl Default for App {
@@ -23,12 +32,39 @@ impl Default for App {
         Self {
             window: None,
             gpu: None,
-            start: std::time::Instant::now(),
             frame_timer: perf::FrameTimer::new(120),
             last_frame_start: None,
             occluded: false,
+            page_frame: None,
         }
     }
+}
+
+fn build_page_frame(viewport_width: f32, viewport_height: f32) -> scene::Frame {
+    let html = include_str!("../assets/fixture.html");
+    let css = include_str!("../assets/fixture.css");
+
+    let html_tokens = DomTokenizer::tokenize(html);
+    let Node::Element(document) = DomParser::parse(&html_tokens) else {
+        panic!("fixture.html: expected a document element");
+    };
+    let root = document
+        .children
+        .into_iter()
+        .find_map(|child| match child {
+            Node::Element(el) => Some(el),
+            Node::Text(_) | Node::Comment(_) => None,
+        })
+        .expect("fixture.html: expected at least one root element");
+
+    let css_tokens = CssTokenizer::tokenize(css);
+    let stylesheet = CssParser::parse(&css_tokens);
+
+    let styled = resolve_styles(&root, &stylesheet);
+    let layout_box = layout::layout(&styled, viewport_width, viewport_height)
+        .expect("fixture.html's root must not be display:none");
+
+    paint(&layout_box)
 }
 
 impl ApplicationHandler for App {
@@ -45,6 +81,7 @@ impl ApplicationHandler for App {
         let uncapped = std::env::var("FERRIS_UNCAPPED").map(|v| v == "1").unwrap_or(false);
         match Renderer::new(window.clone(), scale_factor, uncapped) {
             Some(gpu) => {
+                self.page_frame = Some(build_page_frame(gpu.logical_width(), gpu.logical_height()));
                 self.gpu = Some(gpu);
                 self.window = Some(window);
             }
@@ -84,9 +121,7 @@ impl ApplicationHandler for App {
                 }
                 self.last_frame_start = Some(now);
 
-                let elapsed = self.start.elapsed().as_secs_f32();
-                let (w, h) = (gpu.logical_width(), gpu.logical_height());
-                let mut frame = scene::build_test_scene(elapsed, w, h);
+                let mut frame = self.page_frame.clone().unwrap_or_default();
 
                 let overlay = format!(
                     "{:.1} fps | {:.2} ms/frame | budget {}",
