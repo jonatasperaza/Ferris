@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 ferris-layout = { path = "../ferris-layout" }
-ferris-compositor = { path = "../ferris-compositor" }
+ferris-scene = { path = "../ferris-scene" }
 ferris-dom = { path = "../ferris-dom" }
 ferris-style = { path = "../ferris-style" }
 

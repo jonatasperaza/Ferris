@@ -601,6 +601,12 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "env_logger",
+ "ferris-css",
+ "ferris-dom",
+ "ferris-layout",
+ "ferris-paint",
+ "ferris-scene",
+ "ferris-style",
  "glyphon",
  "log",
  "pollster",
@@ -629,12 +635,16 @@ dependencies = [
 name = "ferris-paint"
 version = "0.1.0"
 dependencies = [
- "ferris-compositor",
  "ferris-css",
  "ferris-dom",
  "ferris-layout",
+ "ferris-scene",
  "ferris-style",
 ]
+
+[[package]]
+name = "ferris-scene"
+version = "0.1.0"
 
 [[package]]
 name = "ferris-style"

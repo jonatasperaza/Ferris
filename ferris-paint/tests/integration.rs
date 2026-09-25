@@ -10,7 +10,7 @@
 // crate tokenizes first, then parses. This matches the established pattern
 // in `ferris-style/tests/integration.rs` and `ferris-layout/tests/integration.rs`.
 
-use ferris_compositor::scene::DrawCommand;
+use ferris_scene::DrawCommand;
 use ferris_css::parser::Parser as CssParser;
 use ferris_css::stylesheet::Stylesheet;
 use ferris_css::tokenizer::Tokenizer as CssTokenizer;

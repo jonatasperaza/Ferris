@@ -1,4 +1,4 @@
-use ferris_compositor::scene::{DrawCommand, Frame, RectCommand, TextCommand};
+use ferris_scene::{DrawCommand, Frame, RectCommand, TextCommand};
 use ferris_dom::dom::Node;
 use ferris_layout::layout::LayoutBox;
 use ferris_layout::length::{parse_length, Length};

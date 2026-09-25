@@ -11,3 +11,9 @@ bytemuck = { version = "1.16", features = ["derive"] }
 pollster = "0.3"
 log = "0.4"
 env_logger = "0.11"
+ferris-dom = { path = "../ferris-dom" }
+ferris-css = { path = "../ferris-css" }
+ferris-style = { path = "../ferris-style" }
+ferris-layout = { path = "../ferris-layout" }
+ferris-paint = { path = "../ferris-paint" }
+ferris-scene = { path = "../ferris-scene" }
