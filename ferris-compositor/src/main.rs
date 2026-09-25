@@ -70,7 +70,7 @@ impl App {
     /// endereço. Não mexe no histórico — quem chama decide isso antes
     /// (Voltar/Avançar já moveram o índice; Recarregar não move nada;
     /// uma URL nova digitada já chamou `history.go` antes de chegar aqui).
-    fn navigate_interactive(&mut self, source: ferris_loader::Source) {
+    fn navigate_interactive(&mut self, source: ferris_loader::Source) -> bool {
         match ferris_loader::load_page(&source) {
             Ok((root, stylesheet)) => {
                 if let (Some(gpu), Some(chrome)) = (&self.gpu, &self.chrome) {
@@ -81,11 +81,28 @@ impl App {
                     let text = chrome::source_display_text(&source);
                     chrome.address_bar.set_text(&text);
                 }
+                true
             }
             Err(ferris_loader::LoadError::Fetch(msg)) => {
                 log::warn!("navigation failed: {msg}");
                 if let Some(chrome) = self.chrome.as_mut() {
                     chrome.address_bar.set_error(Some(msg));
+                }
+                false
+            }
+        }
+    }
+
+    /// Confirma o texto digitado na barra de endereço (Enter). Só grava a
+    /// nova URL/caminho no histórico quando a navegação de fato tem
+    /// sucesso — uma navegação digitada que falha não deve deixar
+    /// entrada morta no histórico (ver doc-comment de `navigate_interactive`).
+    fn commit_address_bar(&mut self) {
+        let committed = self.chrome.as_mut().and_then(|c| c.address_bar.commit());
+        if let Some(source) = committed {
+            if self.navigate_interactive(source.clone()) {
+                if let Some(chrome) = self.chrome.as_mut() {
+                    chrome.history.go(source);
                 }
             }
         }
@@ -106,15 +123,7 @@ impl App {
                 KeyIntent::Back => self.go_back(),
                 KeyIntent::Forward => self.go_forward(),
                 KeyIntent::Reload => self.reload(),
-                KeyIntent::Commit => {
-                    let committed = self.chrome.as_mut().and_then(|c| c.address_bar.commit());
-                    if let Some(source) = committed {
-                        if let Some(chrome) = self.chrome.as_mut() {
-                            chrome.history.go(source.clone());
-                        }
-                        self.navigate_interactive(source);
-                    }
-                }
+                KeyIntent::Commit => self.commit_address_bar(),
                 KeyIntent::Backspace => {
                     if let Some(chrome) = self.chrome.as_mut() {
                         chrome.address_bar.on_backspace();
@@ -182,6 +191,7 @@ fn classify_key(logical_key: &Key, modifiers: ModifiersState, address_bar_focuse
         Key::Named(NamedKey::Enter) => vec![KeyIntent::Commit],
         Key::Named(NamedKey::Backspace) => vec![KeyIntent::Backspace],
         Key::Named(NamedKey::Escape) => vec![KeyIntent::Cancel],
+        Key::Named(NamedKey::Space) => vec![KeyIntent::Type(' ')],
         Key::Character(s) => s.chars().map(KeyIntent::Type).collect(),
         _ => vec![KeyIntent::Ignore],
     }
@@ -390,6 +400,24 @@ mod tests {
         assert!(error.is_some(), "a failed navigation must set a visible error on the address bar");
     }
 
+    // --- Review Focus: a failed typed navigation must not pollute history ---
+    #[test]
+    fn commit_address_bar_on_failed_navigation_does_not_add_to_history() {
+        let mut app = App::new(ferris_loader::Source::File(std::path::PathBuf::from("does-not-exist.html")));
+        app.chrome = Some(Chrome::new(app.initial_source.clone(), "does-not-exist.html".to_string()));
+
+        app.chrome.as_mut().unwrap().address_bar.set_focused(true);
+        for c in "still-does-not-exist.html".chars() {
+            app.chrome.as_mut().unwrap().address_bar.on_char(c);
+        }
+        app.commit_address_bar();
+
+        assert!(
+            !app.chrome.as_ref().unwrap().history.can_go_back(),
+            "a failed typed navigation must not be added to history"
+        );
+    }
+
     // --- Review Focus: shortcuts work regardless of focus; Ctrl+L never leaks "l" ---
     #[test]
     fn classify_key_ctrl_l_focuses_the_address_bar_and_does_not_type() {
@@ -443,6 +471,13 @@ mod tests {
         let empty_mods = ModifiersState::empty();
         assert_eq!(classify_key(&key, empty_mods, false), vec![KeyIntent::Ignore]);
         assert_eq!(classify_key(&key, empty_mods, true), vec![KeyIntent::Type('z')]);
+    }
+
+    #[test]
+    fn classify_key_space_types_a_space_when_focused() {
+        let key = Key::Named(NamedKey::Space);
+        assert_eq!(classify_key(&key, ModifiersState::empty(), true), vec![KeyIntent::Type(' ')]);
+        assert_eq!(classify_key(&key, ModifiersState::empty(), false), vec![KeyIntent::Ignore]);
     }
 
     #[test]

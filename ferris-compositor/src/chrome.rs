@@ -91,15 +91,20 @@ impl AddressBar {
 
     pub fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+        if focused {
+            self.error = None;
+        }
     }
 
     pub fn on_char(&mut self, c: char) {
+        self.error = None;
         let byte_idx = Self::byte_index(&self.text, self.cursor);
         self.text.insert(byte_idx, c);
         self.cursor += 1;
     }
 
     pub fn on_backspace(&mut self) {
+        self.error = None;
         if self.cursor == 0 {
             return;
         }
@@ -443,6 +448,30 @@ mod tests {
         assert_eq!(bar.text(), "é");
         bar.on_backspace();
         assert_eq!(bar.text(), "");
+    }
+
+    #[test]
+    fn on_char_clears_a_previous_error() {
+        let mut bar = AddressBar::new("a.html".to_string());
+        bar.set_error(Some("not found".to_string()));
+        bar.on_char('x');
+        assert_eq!(bar.error(), None);
+    }
+
+    #[test]
+    fn on_backspace_clears_a_previous_error() {
+        let mut bar = AddressBar::new("abc".to_string());
+        bar.set_error(Some("not found".to_string()));
+        bar.on_backspace();
+        assert_eq!(bar.error(), None);
+    }
+
+    #[test]
+    fn set_focused_true_clears_a_previous_error() {
+        let mut bar = AddressBar::new("a.html".to_string());
+        bar.set_error(Some("not found".to_string()));
+        bar.set_focused(true);
+        assert_eq!(bar.error(), None);
     }
 
     #[test]
