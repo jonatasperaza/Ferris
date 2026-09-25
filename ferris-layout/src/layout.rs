@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
+use ferris_dom::dom::Node;
 use ferris_style::StyledNode;
 
-use crate::length::{parse_length, Length};
+use crate::length::{parse_length, resolve_font_size, Length};
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Edges {
@@ -21,6 +22,7 @@ pub struct LayoutBox<'a> {
     pub margin: Edges,
     pub border: Edges,
     pub padding: Edges,
+    pub text_lines: Vec<String>,
     pub children: Vec<LayoutBox<'a>>,
 }
 
@@ -132,8 +134,27 @@ fn layout_block<'a>(
     let content_x = containing_block.content_x + margin.left + border.left + padding.left;
     let content_y = containing_block.content_y + margin.top + border.top + padding.top;
 
+    let raw_text: String = node
+        .element
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            Node::Text(s) => Some(s.as_str()),
+            Node::Comment(_) | Node::Element(_) => None,
+        })
+        .collect();
+    let collapsed_text = raw_text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let font_size = resolve_font_size(&node.style);
+    let text_lines = if collapsed_text.is_empty() {
+        Vec::new()
+    } else {
+        ferris_text::wrap_lines(&collapsed_text, font_size, width)
+    };
+    let text_block_height = text_lines.len() as f32 * ferris_text::line_height(font_size);
+
     let mut children = Vec::new();
-    let mut cursor_y = content_y;
+    let mut cursor_y = content_y + text_block_height;
     for child in &node.children {
         let child_containing_block = ContainingBlock {
             content_x,
@@ -162,7 +183,7 @@ fn layout_block<'a>(
         other => resolved_length_or(other, 0.0, auto_height).max(0.0),
     };
 
-    Some(LayoutBox { styled_node: node, x: content_x, y: content_y, width, height, margin, border, padding, children })
+    Some(LayoutBox { styled_node: node, x: content_x, y: content_y, width, height, margin, border, padding, text_lines, children })
 }
 
 #[cfg(test)]
@@ -458,5 +479,36 @@ mod tests {
         let style = style_with(&[("border-top", "4px")]);
         let edges = resolve_edges(&style, "border");
         assert_eq!(edges.top, 0.0);
+    }
+
+    #[test]
+    fn single_short_line_of_text_fits_on_one_line() {
+        let mut el = Element::new("p");
+        el.children.push(Node::Text("hi".to_string()));
+        let node = leaf_styled_node(&el, &[]);
+        let root = layout(&node, 800.0, 600.0).unwrap();
+        assert_eq!(root.text_lines, vec!["hi".to_string()]);
+        assert_eq!(root.height, ferris_text::line_height(16.0));
+    }
+
+    #[test]
+    fn long_text_in_narrow_box_wraps_into_multiple_lines_and_grows_height() {
+        let mut el = Element::new("p");
+        el.children.push(Node::Text(
+            "this is a long sentence that should not fit on a single line inside a very narrow box".to_string(),
+        ));
+        let node = leaf_styled_node(&el, &[("width", "80px")]);
+        let root = layout(&node, 800.0, 600.0).unwrap();
+        assert!(root.text_lines.len() > 1, "expected multiple wrapped lines, got {:?}", root.text_lines);
+        let expected_height = root.text_lines.len() as f32 * ferris_text::line_height(16.0);
+        assert_eq!(root.height, expected_height);
+    }
+
+    #[test]
+    fn element_without_direct_text_has_empty_text_lines() {
+        let el = Element::new("div");
+        let node = leaf_styled_node(&el, &[]);
+        let root = layout(&node, 800.0, 600.0).unwrap();
+        assert!(root.text_lines.is_empty());
     }
 }

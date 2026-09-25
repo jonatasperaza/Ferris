@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Length {
     Px(f32),
@@ -41,6 +43,13 @@ pub fn parse_length(value: Option<&str>) -> Length {
     }
 
     Length::Auto
+}
+
+pub fn resolve_font_size(style: &HashMap<String, String>) -> f32 {
+    match parse_length(style.get("font-size").map(String::as_str)) {
+        Length::Px(n) if n.is_finite() && n > 0.0 => n,
+        _ => 16.0,
+    }
 }
 
 #[cfg(test)]
@@ -127,5 +136,39 @@ mod tests {
     #[test]
     fn bare_negative_zero_with_no_unit_is_px_zero() {
         assert_eq!(parse_length(Some("-0")), Length::Px(0.0));
+    }
+
+    fn style_with(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn resolve_font_size_px_used_directly() {
+        let style = style_with(&[("font-size", "24px")]);
+        assert_eq!(resolve_font_size(&style), 24.0);
+    }
+
+    #[test]
+    fn resolve_font_size_absent_falls_back_to_sixteen() {
+        let style = HashMap::new();
+        assert_eq!(resolve_font_size(&style), 16.0);
+    }
+
+    #[test]
+    fn resolve_font_size_percent_falls_back_to_sixteen() {
+        let style = style_with(&[("font-size", "150%")]);
+        assert_eq!(resolve_font_size(&style), 16.0);
+    }
+
+    #[test]
+    fn resolve_font_size_zero_falls_back_to_sixteen() {
+        let style = style_with(&[("font-size", "0px")]);
+        assert_eq!(resolve_font_size(&style), 16.0);
+    }
+
+    #[test]
+    fn resolve_font_size_negative_falls_back_to_sixteen() {
+        let style = style_with(&[("font-size", "-12px")]);
+        assert_eq!(resolve_font_size(&style), 16.0);
     }
 }

@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 ferris-dom = { path = "../ferris-dom" }
 ferris-style = { path = "../ferris-style" }
+ferris-text = { path = "../ferris-text" }
 
 [dev-dependencies]
 ferris-css = { path = "../ferris-css" }

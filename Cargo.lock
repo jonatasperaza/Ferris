@@ -629,6 +629,7 @@ dependencies = [
  "ferris-css",
  "ferris-dom",
  "ferris-style",
+ "ferris-text",
 ]
 
 [[package]]

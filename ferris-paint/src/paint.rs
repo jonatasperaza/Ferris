@@ -72,6 +72,7 @@ mod tests {
             margin: Edges::default(),
             border: edges,
             padding: edges,
+            text_lines: Vec::new(),
             children: Vec::new(),
         }
     }
@@ -260,6 +261,7 @@ mod tests {
             margin: Edges::default(),
             border: Edges::default(),
             padding: Edges::default(),
+            text_lines: Vec::new(),
             children: vec![child_box],
         };
 
