@@ -11,7 +11,11 @@ fn font_system() -> &'static Mutex<FontSystem> {
     FONT_SYSTEM.get_or_init(|| Mutex::new(FontSystem::new()))
 }
 
-pub fn wrap_lines(text: &str, font_size: f32, max_width: f32) -> Vec<String> {
+/// Wraps `text` at `max_width` and returns each wrapped line as a byte range
+/// (start, end) into `text`, rather than an owned `String`. This lets callers
+/// (e.g. `ferris-layout`) correlate wrapped lines back to positions in the
+/// original source text without re-scanning for substring offsets.
+pub fn wrap_line_spans(text: &str, font_size: f32, max_width: f32) -> Vec<(usize, usize)> {
     if text.is_empty() {
         return Vec::new();
     }
@@ -38,7 +42,7 @@ pub fn wrap_lines(text: &str, font_size: f32, max_width: f32) -> Vec<String> {
     buffer.set_text(&mut font_system, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
     buffer.shape_until_scroll(&mut font_system, false);
 
-    let mut lines = Vec::new();
+    let mut spans = Vec::new();
     for run in buffer.layout_runs() {
         if run.glyphs.is_empty() {
             continue;
@@ -51,18 +55,50 @@ pub fn wrap_lines(text: &str, font_size: f32, max_width: f32) -> Vec<String> {
         // silent truncation of the run's text.
         let start = run.glyphs.iter().map(|g| g.start).min().unwrap();
         let end = run.glyphs.iter().map(|g| g.end).max().unwrap();
-        lines.push(run.text[start..end].to_string());
+        spans.push((start, end));
     }
 
-    if lines.is_empty() {
+    if spans.is_empty() {
         // Defensive fallback: if layout_runs() somehow produced nothing for
         // non-empty input (should not happen per cosmic-text's contract, but
         // this crate never panics or silently drops all content), fall back
         // to the whole text as a single unwrapped line.
-        lines.push(text.to_string());
+        spans.push((0, text.len()));
     }
 
-    lines
+    spans
+}
+
+pub fn wrap_lines(text: &str, font_size: f32, max_width: f32) -> Vec<String> {
+    wrap_line_spans(text, font_size, max_width)
+        .into_iter()
+        .map(|(start, end)| text[start..end].to_string())
+        .collect()
+}
+
+/// Measures the rendered pixel width of `text` laid out on a single,
+/// unbounded line (no wrapping) at `font_size`. Used to position `InlineRun`s
+/// left-to-right within an already-wrapped line — measurement, not wrapping.
+pub fn measure_width(text: &str, font_size: f32) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+
+    let mut font_system = match font_system().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let metrics = Metrics::new(font_size, line_height(font_size));
+    let mut buffer = Buffer::new(&mut font_system, metrics);
+    // No width bound: a single unwrapped measurement line, same technique
+    // that fixed piece 2.6's double-wrap renderer bug (see
+    // ferris-compositor/src/renderer/text.rs).
+    buffer.set_size(&mut font_system, None, None);
+    buffer.set_text(&mut font_system, text, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
+    buffer.shape_until_scroll(&mut font_system, false);
+
+    buffer.layout_runs().map(|run| run.line_w).fold(0.0f32, f32::max)
 }
 
 #[cfg(test)]
@@ -160,5 +196,44 @@ mod tests {
         let lines = wrap_lines("hello world", 16.0, 800.0);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0], "hello world");
+    }
+
+    #[test]
+    fn wrap_line_spans_byte_ranges_match_wrap_lines_output() {
+        let text = "this is a long sentence that should not fit on a single line inside a very narrow box";
+        let spans = wrap_line_spans(text, 16.0, 80.0);
+        let via_spans: Vec<&str> = spans.iter().map(|&(start, end)| &text[start..end]).collect();
+        let via_wrap_lines = wrap_lines(text, 16.0, 80.0);
+        assert_eq!(via_spans, via_wrap_lines, "slicing text by wrap_line_spans' byte ranges must reproduce exactly what wrap_lines returns");
+    }
+
+    #[test]
+    fn wrap_line_spans_empty_text_returns_empty_vec() {
+        assert!(wrap_line_spans("", 16.0, 800.0).is_empty());
+    }
+
+    #[test]
+    fn wrap_line_spans_non_positive_max_width_does_not_panic() {
+        let spans = wrap_line_spans("hello world", 16.0, 0.0);
+        assert!(!spans.is_empty());
+    }
+
+    #[test]
+    fn measure_width_of_empty_string_is_zero() {
+        assert_eq!(measure_width("", 16.0), 0.0);
+    }
+
+    #[test]
+    fn measure_width_longer_text_is_wider() {
+        let short = measure_width("hi", 16.0);
+        let long = measure_width("hello world this is longer", 16.0);
+        assert!(long > short, "longer text ({long}) should measure wider than shorter text ({short})");
+    }
+
+    #[test]
+    fn measure_width_larger_font_is_wider() {
+        let small = measure_width("hello", 12.0);
+        let large = measure_width("hello", 48.0);
+        assert!(large > small, "the same text at a larger font size ({large}) should measure wider than at a smaller one ({small})");
     }
 }
