@@ -17,7 +17,17 @@ pub fn wrap_lines(text: &str, font_size: f32, max_width: f32) -> Vec<String> {
     }
 
     let width = if max_width > 0.0 { max_width } else { 1.0 };
-    let mut font_system = font_system().lock().expect("font system mutex poisoned");
+    // Recover from a poisoned lock rather than propagating the poison: a
+    // std::sync::Mutex only marks itself poisoned as a precaution when a
+    // previous holder panicked mid-access, but it never corrupts the data it
+    // guards. Using `.into_inner()` on the poison error recovers the (still
+    // valid) FontSystem instead of cascading a panic in *every* subsequent
+    // caller for the rest of the process, which is what `.expect()` here
+    // used to do after any single panicking call.
+    let mut font_system = match font_system().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
 
     let metrics = Metrics::new(font_size, line_height(font_size));
     let mut buffer = Buffer::new(&mut font_system, metrics);
@@ -33,8 +43,14 @@ pub fn wrap_lines(text: &str, font_size: f32, max_width: f32) -> Vec<String> {
         if run.glyphs.is_empty() {
             continue;
         }
-        let start = run.glyphs.first().unwrap().start;
-        let end = run.glyphs.last().unwrap().end;
+        // Use min/max over all glyphs rather than first()/last(): cosmic-text
+        // returns glyphs in VISUAL (display) order, not logical (source
+        // text) order, when a line contains bidi-reordered text (e.g. RTL
+        // Hebrew/Arabic mixed with LTR text). first()/last() would then pick
+        // the wrong byte range, causing either a panic (start > end) or
+        // silent truncation of the run's text.
+        let start = run.glyphs.iter().map(|g| g.start).min().unwrap();
+        let end = run.glyphs.iter().map(|g| g.end).max().unwrap();
         lines.push(run.text[start..end].to_string());
     }
 
@@ -99,5 +115,50 @@ mod tests {
         assert!(!lines_zero.is_empty());
         let lines_negative = wrap_lines("hello world", 16.0, -50.0);
         assert!(!lines_negative.is_empty());
+    }
+
+    // Regression tests for C1: bidi (RTL/LTR mixed) text caused wrap_lines to
+    // compute wrapped-line byte spans from run.glyphs.first()/last(), which
+    // assumes glyphs are returned in logical (source-text) order. cosmic-text
+    // actually returns glyphs in VISUAL order after bidi reordering, so that
+    // assumption broke in two ways: a panic in narrow boxes where the
+    // "first" visual glyph's start byte was greater than the "last" visual
+    // glyph's end byte, and silent text loss in wide boxes where the byte
+    // range simply picked up the wrong (too-small) span.
+
+    #[test]
+    fn narrow_box_with_mixed_rtl_text_does_not_panic() {
+        // Before the fix, this reproduced a real panic in the GPU pipeline:
+        // "byte range starts at X but ends at Y" from run.text[start..end],
+        // because cosmic-text returns glyphs in visual (not logical) order
+        // once bidi reordering kicks in for the Hebrew span.
+        let lines = wrap_lines("Say שלום to everyone.", 16.0, 30.0);
+        assert!(!lines.is_empty(), "must produce at least one line without panicking");
+    }
+
+    #[test]
+    fn wide_box_with_mixed_rtl_text_does_not_lose_words() {
+        // Before the fix, this did not panic (no start > end byte range at
+        // this width) but silently dropped the Hebrew word entirely:
+        // "hello world שלום" wrapped down to just "hello world ש".
+        let lines = wrap_lines("hello world שלום", 16.0, 800.0);
+        let joined = lines.join(" ");
+        assert!(joined.contains("hello"), "expected 'hello' to survive wrapping, got {:?}", lines);
+        assert!(joined.contains("world"), "expected 'world' to survive wrapping, got {:?}", lines);
+        assert!(joined.contains("שלום"), "expected the full Hebrew word 'שלום' to survive wrapping without truncation, got {:?}", lines);
+    }
+
+    #[test]
+    fn font_system_mutex_recovers_after_a_problematic_call() {
+        // Even in case some other bidi edge case still manages to panic
+        // while the font system mutex is held, a later plain-ASCII call
+        // must keep working rather than panicking forever because the
+        // mutex was left poisoned. This exercises the RTL case first (which
+        // used to poison the mutex on panic pre-fix) and then confirms a
+        // completely unrelated, normal call still succeeds afterward.
+        let _ = wrap_lines("Say שלום to everyone.", 16.0, 30.0);
+        let lines = wrap_lines("hello world", 16.0, 800.0);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "hello world");
     }
 }
