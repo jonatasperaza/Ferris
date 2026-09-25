@@ -22,8 +22,19 @@ pub struct LayoutBox<'a> {
     pub margin: Edges,
     pub border: Edges,
     pub padding: Edges,
-    pub text_lines: Vec<String>,
+    pub lines: Vec<Vec<InlineRun<'a>>>,
     pub children: Vec<LayoutBox<'a>>,
+}
+
+/// One styled, contiguous, already-positioned run of text within a single
+/// wrapped line — e.g. the `"bold"` segment of `<p>Hello <b>bold</b>
+/// world</p>` gets its own `InlineRun` with `style` pointing at `<b>`'s
+/// resolved style and `x_offset` equal to the measured width of `"Hello "`
+/// that precedes it on the same line.
+pub struct InlineRun<'a> {
+    pub text: String,
+    pub style: &'a HashMap<String, String>,
+    pub x_offset: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -72,6 +83,23 @@ fn resolve_edges(style: &HashMap<String, String>, property: &str) -> Edges {
     }
 }
 
+/// Determines whether `tag_name`/`style` should participate in inline flow
+/// (sharing a wrapped line with surrounding text) rather than stacking as
+/// its own block box. An explicit `display: inline`/`display: block` always
+/// wins; absent that, a fixed list of known inline HTML tags defaults to
+/// inline and everything else defaults to block.
+fn is_inline_display(tag_name: &str, style: &HashMap<String, String>) -> bool {
+    match style.get("display").map(String::as_str) {
+        Some("inline") => return true,
+        Some("block") => return false,
+        _ => {}
+    }
+    matches!(
+        tag_name,
+        "a" | "span" | "em" | "strong" | "b" | "i" | "small" | "code" | "sub" | "sup" | "u" | "mark"
+    )
+}
+
 /// Resolves a single `Length` against `basis` (the relevant containing dimension).
 /// `Length::Auto` returns `default_if_auto` — callers pass the "fill available
 /// space" computation for width, or `0.0` as a placeholder for height (Task 3
@@ -105,6 +133,142 @@ pub fn layout<'a>(root: &'a StyledNode<'a>, viewport_width: f32, viewport_height
     layout_block(root, containing_block, true)
 }
 
+/// Walks `node`'s direct children in true DOM order (mixing `Node::Text` and
+/// `Node::Element`), appending every leading run of text/inline-element
+/// content's RAW (uncollapsed) text into `text_out` and recording one span
+/// per contiguous source run — `(byte_start, byte_end, style)` within
+/// `text_out` — into `spans_out`. Recurses into inline descendants (and
+/// their own inline descendants, arbitrarily deep). Stops at the first
+/// direct child that is a block-level element (not `display:none`, not
+/// inline). Returns the index into `node.children` (the `StyledNode`-only,
+/// element-filtered list — see `ferris_style::resolve_node`, which builds
+/// it in the same relative order as the `Node::Element` entries in
+/// `node.element.children`) of the first child NOT consumed by this pass —
+/// i.e. where the block-child stacking loop should resume — or
+/// `node.children.len()` if every direct child was inline/text.
+fn flatten_inline_content<'a>(
+    node: &'a StyledNode<'a>,
+    text_out: &mut String,
+    spans_out: &mut Vec<(usize, usize, &'a HashMap<String, String>)>,
+) -> usize {
+    let mut element_child_idx = 0;
+    for raw_child in &node.element.children {
+        match raw_child {
+            Node::Text(s) => {
+                let start = text_out.len();
+                text_out.push_str(s);
+                let end = text_out.len();
+                if end > start {
+                    spans_out.push((start, end, &node.style));
+                }
+            }
+            Node::Comment(_) => {}
+            Node::Element(_) => {
+                let child_styled = &node.children[element_child_idx];
+                element_child_idx += 1;
+                if child_styled.style.get("display").map(String::as_str) == Some("none") {
+                    continue;
+                }
+                if is_inline_display(&child_styled.element.tag_name, &child_styled.style) {
+                    flatten_inline_content(child_styled, text_out, spans_out);
+                } else {
+                    return element_child_idx - 1;
+                }
+            }
+        }
+    }
+    element_child_idx
+}
+
+/// Collapses whitespace over the FULL raw sequence (never per-fragment —
+/// see the spec's worked example for why), remapping `raw_spans`' byte
+/// ranges into the collapsed string's coordinate space and merging adjacent
+/// same-style spans that end up contiguous after collapsing.
+fn collapse_whitespace_with_spans<'a>(
+    raw_text: &str,
+    raw_spans: &[(usize, usize, &'a HashMap<String, String>)],
+) -> (String, Vec<(usize, usize, &'a HashMap<String, String>)>) {
+    let mut collapsed = String::new();
+    let mut collapsed_spans: Vec<(usize, usize, &'a HashMap<String, String>)> = Vec::new();
+    let mut last_was_space = true;
+    let mut span_idx = 0;
+
+    for (byte_pos, ch) in raw_text.char_indices() {
+        while span_idx + 1 < raw_spans.len() && byte_pos >= raw_spans[span_idx].1 {
+            span_idx += 1;
+        }
+        let style = raw_spans[span_idx].2;
+
+        if ch.is_whitespace() {
+            if !last_was_space {
+                let start = collapsed.len();
+                collapsed.push(' ');
+                let end = collapsed.len();
+                push_or_extend_span(&mut collapsed_spans, start, end, style);
+            }
+            last_was_space = true;
+        } else {
+            let start = collapsed.len();
+            collapsed.push(ch);
+            let end = collapsed.len();
+            push_or_extend_span(&mut collapsed_spans, start, end, style);
+            last_was_space = false;
+        }
+    }
+
+    if collapsed.ends_with(' ') {
+        collapsed.pop();
+        if let Some(last) = collapsed_spans.last_mut() {
+            last.1 -= 1;
+            if last.0 == last.1 {
+                collapsed_spans.pop();
+            }
+        }
+    }
+
+    (collapsed, collapsed_spans)
+}
+
+fn push_or_extend_span<'a>(
+    spans: &mut Vec<(usize, usize, &'a HashMap<String, String>)>,
+    start: usize,
+    end: usize,
+    style: &'a HashMap<String, String>,
+) {
+    if let Some(last) = spans.last_mut() {
+        if std::ptr::eq(last.2, style) && last.1 == start {
+            last.1 = end;
+            return;
+        }
+    }
+    spans.push((start, end, style));
+}
+
+/// Builds the `InlineRun`s for one wrapped line by intersecting the line's
+/// byte range (within the collapsed text) against every collapsed span,
+/// accumulating each run's `x_offset` left to right via `measure_width`.
+fn runs_for_line<'a>(
+    collapsed_text: &str,
+    collapsed_spans: &[(usize, usize, &'a HashMap<String, String>)],
+    line_start: usize,
+    line_end: usize,
+    font_size: f32,
+) -> Vec<InlineRun<'a>> {
+    let mut runs = Vec::new();
+    let mut x_offset = 0.0;
+    for &(span_start, span_end, style) in collapsed_spans {
+        let overlap_start = span_start.max(line_start);
+        let overlap_end = span_end.min(line_end);
+        if overlap_start < overlap_end {
+            let text = collapsed_text[overlap_start..overlap_end].to_string();
+            let width = ferris_text::measure_width(&text, font_size);
+            runs.push(InlineRun { text, style, x_offset });
+            x_offset += width;
+        }
+    }
+    runs
+}
+
 /// Recursively lays out `node` and its children within `containing_block`.
 /// Width is resolved top-down (from the containing block into this node),
 /// height is resolved bottom-up (from this node's laid-out children), and
@@ -134,28 +298,27 @@ fn layout_block<'a>(
     let content_x = containing_block.content_x + margin.left + border.left + padding.left;
     let content_y = containing_block.content_y + margin.top + border.top + padding.top;
 
-    let raw_text: String = node
-        .element
-        .children
-        .iter()
-        .filter_map(|child| match child {
-            Node::Text(s) => Some(s.as_str()),
-            Node::Comment(_) | Node::Element(_) => None,
-        })
-        .collect();
-    let collapsed_text = raw_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut raw_text = String::new();
+    let mut raw_spans: Vec<(usize, usize, &HashMap<String, String>)> = Vec::new();
+    let resume_idx = flatten_inline_content(node, &mut raw_text, &mut raw_spans);
+    let (collapsed_text, collapsed_spans) = collapse_whitespace_with_spans(&raw_text, &raw_spans);
 
     let font_size = resolve_font_size(&node.style);
-    let text_lines = if collapsed_text.is_empty() {
+    let lines: Vec<Vec<InlineRun>> = if collapsed_text.is_empty() {
         Vec::new()
     } else {
-        ferris_text::wrap_lines(&collapsed_text, font_size, width)
+        ferris_text::wrap_line_spans(&collapsed_text, font_size, width)
+            .into_iter()
+            .map(|(line_start, line_end)| {
+                runs_for_line(&collapsed_text, &collapsed_spans, line_start, line_end, font_size)
+            })
+            .collect()
     };
-    let text_block_height = text_lines.len() as f32 * ferris_text::line_height(font_size);
+    let text_block_height = lines.len() as f32 * ferris_text::line_height(font_size);
 
     let mut children = Vec::new();
     let mut cursor_y = content_y + text_block_height;
-    for child in &node.children {
+    for child in &node.children[resume_idx..] {
         let child_containing_block = ContainingBlock {
             content_x,
             content_y: cursor_y,
@@ -183,7 +346,7 @@ fn layout_block<'a>(
         other => resolved_length_or(other, 0.0, auto_height).max(0.0),
     };
 
-    Some(LayoutBox { styled_node: node, x: content_x, y: content_y, width, height, margin, border, padding, text_lines, children })
+    Some(LayoutBox { styled_node: node, x: content_x, y: content_y, width, height, margin, border, padding, lines, children })
 }
 
 #[cfg(test)]
@@ -487,7 +650,9 @@ mod tests {
         el.children.push(Node::Text("hi".to_string()));
         let node = leaf_styled_node(&el, &[]);
         let root = layout(&node, 800.0, 600.0).unwrap();
-        assert_eq!(root.text_lines, vec!["hi".to_string()]);
+        assert_eq!(root.lines.len(), 1);
+        assert_eq!(root.lines[0].len(), 1);
+        assert_eq!(root.lines[0][0].text, "hi");
         assert_eq!(root.height, ferris_text::line_height(16.0));
     }
 
@@ -499,16 +664,160 @@ mod tests {
         ));
         let node = leaf_styled_node(&el, &[("width", "80px")]);
         let root = layout(&node, 800.0, 600.0).unwrap();
-        assert!(root.text_lines.len() > 1, "expected multiple wrapped lines, got {:?}", root.text_lines);
-        let expected_height = root.text_lines.len() as f32 * ferris_text::line_height(16.0);
+        assert!(root.lines.len() > 1, "expected multiple wrapped lines, got {:?}", root.lines.iter().map(|l| l.iter().map(|r| r.text.clone()).collect::<Vec<_>>()).collect::<Vec<_>>());
+        let expected_height = root.lines.len() as f32 * ferris_text::line_height(16.0);
         assert_eq!(root.height, expected_height);
     }
 
     #[test]
-    fn element_without_direct_text_has_empty_text_lines() {
+    fn element_without_direct_text_has_empty_lines() {
         let el = Element::new("div");
         let node = leaf_styled_node(&el, &[]);
         let root = layout(&node, 800.0, 600.0).unwrap();
-        assert!(root.text_lines.is_empty());
+        assert!(root.lines.is_empty());
+    }
+
+    #[test]
+    fn is_inline_display_recognizes_known_inline_tags() {
+        let style = HashMap::new();
+        for tag in ["a", "span", "em", "strong", "b", "i", "small", "code", "sub", "sup", "u", "mark"] {
+            assert!(is_inline_display(tag, &style), "{tag} should be inline by default");
+        }
+    }
+
+    #[test]
+    fn is_inline_display_defaults_unknown_tags_to_block() {
+        let style = HashMap::new();
+        assert!(!is_inline_display("div", &style));
+        assert!(!is_inline_display("p", &style));
+        assert!(!is_inline_display("some-custom-tag", &style));
+    }
+
+    #[test]
+    fn is_inline_display_explicit_inline_wins_over_a_normally_block_tag() {
+        let style = style_with(&[("display", "inline")]);
+        assert!(is_inline_display("div", &style));
+    }
+
+    #[test]
+    fn is_inline_display_explicit_block_wins_over_a_normally_inline_tag() {
+        let style = style_with(&[("display", "block")]);
+        assert!(!is_inline_display("span", &style));
+    }
+
+    #[test]
+    fn collapse_whitespace_with_spans_merges_double_space_and_adjacent_same_style_runs() {
+        let a = style_with(&[("color", "red")]);
+        let raw_spans: Vec<(usize, usize, &HashMap<String, String>)> = vec![(0, 5, &a), (5, 11, &a)];
+        let (collapsed, spans) = collapse_whitespace_with_spans("hello  world", &raw_spans);
+        assert_eq!(collapsed, "hello world");
+        assert_eq!(spans, vec![(0, 11, &a)], "two adjacent same-style spans separated by collapsed whitespace must merge into one span");
+    }
+
+    #[test]
+    fn collapse_whitespace_with_spans_trims_leading_and_trailing_whitespace() {
+        let a = style_with(&[]);
+        let raw_spans: Vec<(usize, usize, &HashMap<String, String>)> = vec![(0, 8, &a)];
+        let (collapsed, spans) = collapse_whitespace_with_spans("  hi  ", &raw_spans);
+        assert_eq!(collapsed, "hi");
+        assert_eq!(spans, vec![(0, 2, &a)]);
+    }
+
+    #[test]
+    fn hello_bold_world_produces_three_runs_with_correct_styles_and_offsets() {
+        // Worked example from the spec: <p>Hello <b>bold</b> world</p>
+        let mut b_el = Element::new("b");
+        b_el.children.push(Node::Text("bold".to_string()));
+        let b_styled = StyledNode { element: &b_el, style: HashMap::new(), children: Vec::new() };
+
+        let mut p_el = Element::new("p");
+        p_el.children.push(Node::Text("Hello ".to_string()));
+        p_el.children.push(Node::Element(b_el.clone()));
+        p_el.children.push(Node::Text(" world".to_string()));
+        let p_styled = StyledNode { element: &p_el, style: HashMap::new(), children: vec![b_styled] };
+
+        let root = layout(&p_styled, 800.0, 600.0).unwrap();
+        assert_eq!(root.lines.len(), 1, "short text at 800px must fit on one line");
+        let line = &root.lines[0];
+        assert_eq!(line.len(), 3, "expected 3 runs: 'Hello ', 'bold', ' world'");
+        assert_eq!(line[0].text, "Hello ");
+        assert_eq!(line[1].text, "bold");
+        assert_eq!(line[2].text, " world");
+        assert_eq!(line[0].x_offset, 0.0);
+        assert!(line[1].x_offset > 0.0, "second run must start after the first, not at 0");
+        assert!(line[2].x_offset > line[1].x_offset, "third run must start after the second");
+    }
+
+    #[test]
+    fn second_run_on_a_line_starts_at_the_first_runs_measured_width() {
+        let mut b_el = Element::new("b");
+        b_el.children.push(Node::Text("bold".to_string()));
+        let b_styled = StyledNode { element: &b_el, style: HashMap::new(), children: Vec::new() };
+
+        let mut p_el = Element::new("p");
+        p_el.children.push(Node::Text("Hello ".to_string()));
+        p_el.children.push(Node::Element(b_el.clone()));
+        let p_styled = StyledNode { element: &p_el, style: HashMap::new(), children: vec![b_styled] };
+
+        let root = layout(&p_styled, 800.0, 600.0).unwrap();
+        let line = &root.lines[0];
+        let expected_offset = ferris_text::measure_width("Hello ", 16.0);
+        assert!(
+            (line[1].x_offset - expected_offset).abs() < 0.01,
+            "second run's x_offset ({}) should equal the first run's measured width ({})",
+            line[1].x_offset,
+            expected_offset
+        );
+    }
+
+    #[test]
+    fn display_none_inline_child_is_skipped_without_breaking_surrounding_text() {
+        let mut hidden_el = Element::new("span");
+        hidden_el.children.push(Node::Text("hidden".to_string()));
+        let hidden_styled = StyledNode { element: &hidden_el, style: style_with(&[("display", "none")]), children: Vec::new() };
+
+        let mut p_el = Element::new("p");
+        p_el.children.push(Node::Text("before ".to_string()));
+        p_el.children.push(Node::Element(hidden_el.clone()));
+        p_el.children.push(Node::Text(" after".to_string()));
+        let p_styled = StyledNode { element: &p_el, style: HashMap::new(), children: vec![hidden_styled] };
+
+        let root = layout(&p_styled, 800.0, 600.0).unwrap();
+        let line = &root.lines[0];
+        let joined: String = line.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(joined, "before after");
+        assert!(!joined.contains("hidden"));
+    }
+
+    #[test]
+    fn block_child_interrupts_inline_flow_and_stacks_separately() {
+        let mut span_el = Element::new("span");
+        span_el.children.push(Node::Text("inline text".to_string()));
+        let span_styled = StyledNode { element: &span_el, style: HashMap::new(), children: Vec::new() };
+
+        let mut div_el = Element::new("div");
+        div_el.children.push(Node::Text("block content".to_string()));
+        let div_styled = StyledNode { element: &div_el, style: style_with(&[("height", "20px")]), children: Vec::new() };
+
+        let mut p_el = Element::new("p");
+        p_el.children.push(Node::Element(span_el.clone()));
+        p_el.children.push(Node::Element(div_el.clone()));
+        let p_styled = StyledNode { element: &p_el, style: HashMap::new(), children: vec![span_styled, div_styled] };
+
+        let root = layout(&p_styled, 800.0, 600.0).unwrap();
+        assert_eq!(root.lines.len(), 1, "the leading inline span must produce one line of inline content");
+        assert_eq!(root.lines[0][0].text, "inline text");
+        assert_eq!(root.children.len(), 1, "the div must be stacked as a block child, not flattened into the inline line");
+        assert_eq!(root.children[0].height, 20.0);
+        assert!(root.children[0].y > root.y, "the block child must be positioned below the inline content");
+    }
+
+    #[test]
+    fn element_without_any_content_has_empty_lines_and_no_children() {
+        let el = Element::new("div");
+        let node = leaf_styled_node(&el, &[]);
+        let root = layout(&node, 800.0, 600.0).unwrap();
+        assert!(root.lines.is_empty());
+        assert!(root.children.is_empty());
     }
 }
