@@ -210,10 +210,11 @@ pub enum ChromeAction {
 
 /// A barra de chrome inteira: campo de endereço editável + histórico de
 /// navegação. `bar_height` é a altura total reservada no topo da janela
-/// (inclui a margem acima/abaixo dos botões).
+/// (inclui a margem acima/abaixo dos botões). `history` é `None` numa
+/// aba recém-aberta que ainda não carregou nenhuma página.
 pub struct Chrome {
     pub address_bar: AddressBar,
-    pub history: NavigationHistory,
+    pub history: Option<NavigationHistory>,
     pub bar_height: f32,
 }
 
@@ -221,22 +222,43 @@ impl Chrome {
     pub fn new(initial: ferris_loader::Source, initial_text: String) -> Self {
         Self {
             address_bar: AddressBar::new(initial_text),
-            history: NavigationHistory::new(initial),
+            history: Some(NavigationHistory::new(initial)),
             bar_height: BAR_HEIGHT,
         }
+    }
+
+    /// Uma aba recém-aberta, sem página carregada ainda: sem histórico,
+    /// texto vazio, barra já focada esperando o usuário digitar.
+    pub fn new_blank() -> Self {
+        let mut address_bar = AddressBar::new(String::new());
+        address_bar.set_focused(true);
+        Self {
+            address_bar,
+            history: None,
+            bar_height: BAR_HEIGHT,
+        }
+    }
+
+    fn can_go_back(&self) -> bool {
+        self.history.as_ref().map(NavigationHistory::can_go_back).unwrap_or(false)
+    }
+
+    fn can_go_forward(&self) -> bool {
+        self.history.as_ref().map(NavigationHistory::can_go_forward).unwrap_or(false)
     }
 
     /// Converte coordenadas de clique (em pixels lógicos, sem escala de
     /// tela) numa ação, ou `None` se o clique caiu fora de qualquer
     /// elemento interativo da barra. Um botão desabilitado (ex: Voltar
-    /// sem histórico anterior) nunca devolve uma ação, mesmo se o
-    /// clique caiu exatamente em cima dele.
+    /// sem histórico, incluindo numa aba em branco sem histórico
+    /// nenhum) nunca devolve uma ação, mesmo se o clique caiu
+    /// exatamente em cima dele.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<ChromeAction> {
         if back_button_rect().contains(x, y) {
-            return self.history.can_go_back().then_some(ChromeAction::Back);
+            return self.can_go_back().then_some(ChromeAction::Back);
         }
         if forward_button_rect().contains(x, y) {
-            return self.history.can_go_forward().then_some(ChromeAction::Forward);
+            return self.can_go_forward().then_some(ChromeAction::Forward);
         }
         if reload_button_rect().contains(x, y) {
             return Some(ChromeAction::Reload);
@@ -261,7 +283,7 @@ impl Chrome {
         let back = back_button_rect();
         frame.push(scene::DrawCommand::Rect(scene::RectCommand {
             x: back.x, y: back.y, width: back.width, height: back.height,
-            color: button_color(self.history.can_go_back()), corner_radius: 4.0,
+            color: button_color(self.can_go_back()), corner_radius: 4.0,
         }));
         frame.push(scene::DrawCommand::Text(scene::TextCommand {
             x: back.x + 10.0, y: back.y + 6.0, content: "<".to_string(), size: 18.0, color: [1.0, 1.0, 1.0, 1.0],
@@ -270,7 +292,7 @@ impl Chrome {
         let forward = forward_button_rect();
         frame.push(scene::DrawCommand::Rect(scene::RectCommand {
             x: forward.x, y: forward.y, width: forward.width, height: forward.height,
-            color: button_color(self.history.can_go_forward()), corner_radius: 4.0,
+            color: button_color(self.can_go_forward()), corner_radius: 4.0,
         }));
         frame.push(scene::DrawCommand::Text(scene::TextCommand {
             x: forward.x + 10.0, y: forward.y + 6.0, content: ">".to_string(), size: 18.0, color: [1.0, 1.0, 1.0, 1.0],
@@ -516,7 +538,7 @@ mod tests {
     fn chrome_with_history(navigate_once: bool) -> Chrome {
         let mut chrome = Chrome::new(file("a.html"), "a.html".to_string());
         if navigate_once {
-            chrome.history.go(file("b.html"));
+            chrome.history.as_mut().unwrap().go(file("b.html"));
         }
         chrome
     }
@@ -545,7 +567,7 @@ mod tests {
     #[test]
     fn hit_test_forward_button_when_enabled_after_back() {
         let mut chrome = chrome_with_history(true);
-        chrome.history.back();
+        chrome.history.as_mut().unwrap().back();
         let forward = forward_button_rect();
         assert_eq!(chrome.hit_test(forward.x + 1.0, forward.y + 1.0), Some(ChromeAction::Forward));
     }
@@ -630,5 +652,29 @@ mod tests {
     fn source_display_text_for_url_shows_the_url() {
         let text = source_display_text(&ferris_loader::Source::Url("https://example.com".to_string()));
         assert_eq!(text, "https://example.com");
+    }
+
+    #[test]
+    fn chrome_new_blank_has_no_history_and_is_focused() {
+        let chrome = Chrome::new_blank();
+        assert!(chrome.history.is_none());
+        assert!(chrome.address_bar.is_focused());
+        assert_eq!(chrome.address_bar.text(), "");
+    }
+
+    #[test]
+    fn hit_test_back_and_forward_on_blank_chrome_return_none() {
+        let chrome = Chrome::new_blank();
+        let back = back_button_rect();
+        assert_eq!(chrome.hit_test(back.x + 1.0, back.y + 1.0), None);
+        let forward = forward_button_rect();
+        assert_eq!(chrome.hit_test(forward.x + 1.0, forward.y + 1.0), None);
+    }
+
+    #[test]
+    fn frame_on_blank_chrome_does_not_panic() {
+        let chrome = Chrome::new_blank();
+        let frame = chrome.frame(800.0);
+        assert!(!frame.commands.is_empty());
     }
 }

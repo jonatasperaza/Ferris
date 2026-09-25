@@ -47,21 +47,21 @@ impl App {
 
     fn go_back(&mut self) {
         let Some(chrome) = self.chrome.as_mut() else { return };
-        if let Some(source) = chrome.history.back().cloned() {
+        if let Some(source) = chrome.history.as_mut().unwrap().back().cloned() {
             self.navigate_interactive(source);
         }
     }
 
     fn go_forward(&mut self) {
         let Some(chrome) = self.chrome.as_mut() else { return };
-        if let Some(source) = chrome.history.forward().cloned() {
+        if let Some(source) = chrome.history.as_mut().unwrap().forward().cloned() {
             self.navigate_interactive(source);
         }
     }
 
     fn reload(&mut self) {
         let Some(chrome) = self.chrome.as_ref() else { return };
-        let source = chrome.history.current().clone();
+        let source = chrome.history.as_ref().unwrap().current().clone();
         self.navigate_interactive(source);
     }
 
@@ -102,7 +102,7 @@ impl App {
         if let Some(source) = committed {
             if self.navigate_interactive(source.clone()) {
                 if let Some(chrome) = self.chrome.as_mut() {
-                    chrome.history.go(source);
+                    chrome.history.as_mut().unwrap().go(source);
                 }
             }
         }
@@ -131,7 +131,7 @@ impl App {
                 }
                 KeyIntent::Cancel => {
                     if let Some(chrome) = self.chrome.as_mut() {
-                        let text = chrome::source_display_text(chrome.history.current());
+                        let text = chrome::source_display_text(chrome.history.as_ref().unwrap().current());
                         chrome.address_bar.cancel(&text);
                     }
                 }
@@ -413,7 +413,7 @@ mod tests {
         app.commit_address_bar();
 
         assert!(
-            !app.chrome.as_ref().unwrap().history.can_go_back(),
+            !app.chrome.as_ref().unwrap().history.as_ref().unwrap().can_go_back(),
             "a failed typed navigation must not be added to history"
         );
     }
