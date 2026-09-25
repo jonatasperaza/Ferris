@@ -1,0 +1,11 @@
+[package]
+name = "ferris-loader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ferris-dom = { path = "../ferris-dom" }
+ferris-css = { path = "../ferris-css" }
+ferris-style = { path = "../ferris-style" }
+ureq = "2"
+url = "2"
