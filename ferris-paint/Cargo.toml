@@ -8,6 +8,7 @@ ferris-layout = { path = "../ferris-layout" }
 ferris-scene = { path = "../ferris-scene" }
 ferris-dom = { path = "../ferris-dom" }
 ferris-style = { path = "../ferris-style" }
+ferris-text = { path = "../ferris-text" }
 
 [dev-dependencies]
 ferris-css = { path = "../ferris-css" }
