@@ -134,17 +134,21 @@ pub fn layout<'a>(root: &'a StyledNode<'a>, viewport_width: f32, viewport_height
 }
 
 /// Walks `node`'s direct children in true DOM order (mixing `Node::Text` and
-/// `Node::Element`), appending every leading run of text/inline-element
-/// content's RAW (uncollapsed) text into `text_out` and recording one span
-/// per contiguous source run — `(byte_start, byte_end, style)` within
-/// `text_out` — into `spans_out`. Recurses into inline descendants (and
-/// their own inline descendants, arbitrarily deep). Stops at the first
-/// direct child that is a block-level element (not `display:none`, not
-/// inline). Returns the index into `node.children` (the `StyledNode`-only,
-/// element-filtered list — see `ferris_style::resolve_node`, which builds
-/// it in the same relative order as the `Node::Element` entries in
-/// `node.element.children`) of the first child NOT consumed by this pass —
-/// i.e. where the block-child stacking loop should resume — or
+/// `Node::Element`), appending every text/inline-element content's RAW
+/// (uncollapsed) text into `text_out` and recording one span per contiguous
+/// source run into `spans_out`. Recurses into inline descendants via
+/// `flatten_inline_content_subtree` (which never stops early, see below).
+/// Tracks the index of the FIRST block-level direct child found (if any) as
+/// the resume point for the caller's block-stacking loop, but — unlike an
+/// earlier version of this function — does NOT stop scanning when it finds
+/// one: it keeps appending any further Text/inline content into the SAME
+/// leading `text_out`/`spans_out` buffers, so no text is ever silently
+/// dropped just because a block sibling sits between two runs of inline
+/// content. This matches piece 2.6's original "pool all direct text
+/// regardless of position" guarantee while still adding 2.7's inline
+/// flattening/coloring on top of it. `display:none` is skipped at any
+/// depth, same as before. Returns the index into `node.children` (the
+/// `StyledNode`-only, element-filtered list) of the first block child, or
 /// `node.children.len()` if every direct child was inline/text.
 fn flatten_inline_content<'a>(
     node: &'a StyledNode<'a>,
@@ -152,6 +156,8 @@ fn flatten_inline_content<'a>(
     spans_out: &mut Vec<(usize, usize, &'a HashMap<String, String>)>,
 ) -> usize {
     let mut element_child_idx = 0;
+    let mut resume_idx: Option<usize> = None;
+
     for raw_child in &node.element.children {
         match raw_child {
             Node::Text(s) => {
@@ -170,14 +176,59 @@ fn flatten_inline_content<'a>(
                     continue;
                 }
                 if is_inline_display(&child_styled.element.tag_name, &child_styled.style) {
-                    flatten_inline_content(child_styled, text_out, spans_out);
-                } else {
-                    return element_child_idx - 1;
+                    flatten_inline_content_subtree(child_styled, text_out, spans_out);
+                } else if resume_idx.is_none() {
+                    resume_idx = Some(element_child_idx - 1);
                 }
+                // A block child found AFTER the first one: nothing extra to
+                // do here — node.children[resume_idx..] in the caller's
+                // block-stacking loop already covers every block child from
+                // the first one onward, inclusive.
             }
         }
     }
-    element_child_idx
+
+    resume_idx.unwrap_or(element_child_idx)
+}
+
+/// Always-recursing variant used once we're already inside an inline
+/// ancestor's own subtree. Unlike `flatten_inline_content`, this NEVER
+/// checks `is_inline_display` and NEVER stops early: once inside an inline
+/// context there is no block-stacking loop left to hand a block-level
+/// descendant off to, so any further descendant — block or not — just has
+/// its own text folded in here instead of being silently dropped. This is
+/// the fix for a real bug: a block element nested inside an inline element
+/// (e.g. `<a><div>card</div></a>`, a common real-world pattern) used to
+/// vanish entirely, along with everything after it inside that inline
+/// element, because the caller ignored this function's old early-return
+/// value.
+fn flatten_inline_content_subtree<'a>(
+    node: &'a StyledNode<'a>,
+    text_out: &mut String,
+    spans_out: &mut Vec<(usize, usize, &'a HashMap<String, String>)>,
+) {
+    let mut element_child_idx = 0;
+    for raw_child in &node.element.children {
+        match raw_child {
+            Node::Text(s) => {
+                let start = text_out.len();
+                text_out.push_str(s);
+                let end = text_out.len();
+                if end > start {
+                    spans_out.push((start, end, &node.style));
+                }
+            }
+            Node::Comment(_) => {}
+            Node::Element(_) => {
+                let child_styled = &node.children[element_child_idx];
+                element_child_idx += 1;
+                if child_styled.style.get("display").map(String::as_str) == Some("none") {
+                    continue;
+                }
+                flatten_inline_content_subtree(child_styled, text_out, spans_out);
+            }
+        }
+    }
 }
 
 /// Collapses whitespace over the FULL raw sequence (never per-fragment —
@@ -819,5 +870,69 @@ mod tests {
         let root = layout(&node, 800.0, 600.0).unwrap();
         assert!(root.lines.is_empty());
         assert!(root.children.is_empty());
+    }
+
+    #[test]
+    fn block_inside_inline_element_is_not_silently_dropped() {
+        // Regression for C1: <a><div>Card title</div><p>Card body</p></a>
+        let mut title_el = Element::new("div");
+        title_el.children.push(Node::Text("Card title".to_string()));
+        let title_styled = StyledNode { element: &title_el, style: HashMap::new(), children: Vec::new() };
+
+        let mut body_el = Element::new("p");
+        body_el.children.push(Node::Text("Card body".to_string()));
+        let body_styled = StyledNode { element: &body_el, style: HashMap::new(), children: Vec::new() };
+
+        let mut a_el = Element::new("a");
+        a_el.children.push(Node::Element(title_el.clone()));
+        a_el.children.push(Node::Element(body_el.clone()));
+        let a_styled = StyledNode { element: &a_el, style: HashMap::new(), children: vec![title_styled, body_styled] };
+
+        let mut outer_el = Element::new("div");
+        outer_el.children.push(Node::Element(a_el.clone()));
+        let outer_styled = StyledNode { element: &outer_el, style: HashMap::new(), children: vec![a_styled] };
+
+        let root = layout(&outer_styled, 800.0, 600.0).unwrap();
+        assert!(!root.lines.is_empty(), "content inside the block-in-inline subtree must not vanish");
+        let joined: String = root.lines.iter().flat_map(|line| line.iter().map(|r| r.text.as_str())).collect();
+        assert!(joined.contains("Card title"), "expected 'Card title' to survive, got {joined:?}");
+        assert!(joined.contains("Card body"), "expected 'Card body' to survive, got {joined:?}");
+    }
+
+    #[test]
+    fn text_after_a_block_sibling_is_not_silently_dropped() {
+        // Regression for C2: <p>line one<br>line two</p>
+        let br_el = Element::new("br");
+        let br_styled = StyledNode { element: &br_el, style: HashMap::new(), children: Vec::new() };
+
+        let mut p_el = Element::new("p");
+        p_el.children.push(Node::Text("line one".to_string()));
+        p_el.children.push(Node::Element(br_el.clone()));
+        p_el.children.push(Node::Text("line two".to_string()));
+        let p_styled = StyledNode { element: &p_el, style: HashMap::new(), children: vec![br_styled] };
+
+        let root = layout(&p_styled, 800.0, 600.0).unwrap();
+        let joined: String = root.lines.iter().flat_map(|line| line.iter().map(|r| r.text.as_str())).collect();
+        assert!(joined.contains("line one"), "expected 'line one' to survive, got {joined:?}");
+        assert!(joined.contains("line two"), "expected 'line two' to survive (previously silently dropped), got {joined:?}");
+    }
+
+    #[test]
+    fn trailing_text_after_a_block_child_is_not_silently_dropped() {
+        // Regression for C2: <div><h1>Title</h1>Some trailing text</div>
+        let mut h1_el = Element::new("h1");
+        h1_el.children.push(Node::Text("Title".to_string()));
+        let h1_styled = StyledNode { element: &h1_el, style: HashMap::new(), children: Vec::new() };
+
+        let mut div_el = Element::new("div");
+        div_el.children.push(Node::Element(h1_el.clone()));
+        div_el.children.push(Node::Text("Some trailing text".to_string()));
+        let div_styled = StyledNode { element: &div_el, style: HashMap::new(), children: vec![h1_styled] };
+
+        let root = layout(&div_styled, 800.0, 600.0).unwrap();
+        let joined: String = root.lines.iter().flat_map(|line| line.iter().map(|r| r.text.as_str())).collect();
+        assert!(joined.contains("Some trailing text"), "expected the trailing text to survive (previously silently dropped), got {joined:?}");
+        assert_eq!(root.children.len(), 1, "the h1 must still be stacked as its own block child");
+        assert_eq!(root.children[0].lines[0][0].text, "Title");
     }
 }
