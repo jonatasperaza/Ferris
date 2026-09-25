@@ -155,7 +155,7 @@ enum KeyIntent {
 }
 
 fn classify_key(logical_key: &Key, modifiers: ModifiersState, address_bar_focused: bool) -> Vec<KeyIntent> {
-    if modifiers.control_key() {
+    if modifiers.control_key() && !modifiers.alt_key() {
         if let Key::Character(s) = logical_key {
             if s.as_str().eq_ignore_ascii_case("l") {
                 return vec![KeyIntent::FocusAddressBar];
@@ -163,7 +163,7 @@ fn classify_key(logical_key: &Key, modifiers: ModifiersState, address_bar_focuse
         }
         return vec![KeyIntent::Ignore];
     }
-    if modifiers.alt_key() {
+    if modifiers.alt_key() && !modifiers.control_key() {
         return match logical_key {
             Key::Named(NamedKey::ArrowLeft) => vec![KeyIntent::Back],
             Key::Named(NamedKey::ArrowRight) => vec![KeyIntent::Forward],
@@ -443,5 +443,13 @@ mod tests {
         let empty_mods = ModifiersState::empty();
         assert_eq!(classify_key(&key, empty_mods, false), vec![KeyIntent::Ignore]);
         assert_eq!(classify_key(&key, empty_mods, true), vec![KeyIntent::Type('z')]);
+    }
+
+    #[test]
+    fn classify_key_ctrl_alt_together_altgr_falls_through_to_typing_when_focused() {
+        let key = Key::Character(SmolStr::new("/"));
+        let both_mods = ModifiersState::CONTROL | ModifiersState::ALT;
+        assert_eq!(classify_key(&key, both_mods, true), vec![KeyIntent::Type('/')], "AltGr (Ctrl+Alt together) must not be swallowed as a phantom shortcut");
+        assert_eq!(classify_key(&key, both_mods, false), vec![KeyIntent::Ignore], "still ignored when unfocused, same as any other character");
     }
 }
