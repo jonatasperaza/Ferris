@@ -45,22 +45,36 @@ impl Parser {
 }
 
 /// Tokenizes and parses `html`, then unwraps the synthetic "document" root
-/// `Parser::parse` always wraps everything in, returning the first real
-/// element found — or an empty `<html>` element if there is none (empty
-/// input, or input with only free text and no tags). Never panics.
+/// `Parser::parse` always wraps everything in. Collects every top-level
+/// element (in order): with none, returns an empty `<html>` element (empty
+/// input, or input with only free text and no tags); with exactly one,
+/// returns it directly, unwrapped; with two or more (e.g. a `<head>...</head>
+/// <body>...</body>` document with no enclosing `<html>`, which is valid
+/// HTML5), synthesizes an `<html>` element whose children are all of them,
+/// in order, so no top-level content is silently dropped. Never panics.
 pub fn parse_document(html: &str) -> Element {
     let tokens = Tokenizer::tokenize(html);
     let Node::Element(document) = Parser::parse(&tokens) else {
         return Element::new("html");
     };
-    document
+    let mut top_level_elements: Vec<Element> = document
         .children
         .into_iter()
-        .find_map(|child| match child {
+        .filter_map(|child| match child {
             Node::Element(el) => Some(el),
             Node::Text(_) | Node::Comment(_) => None,
         })
-        .unwrap_or_else(|| Element::new("html"))
+        .collect();
+
+    match top_level_elements.len() {
+        0 => Element::new("html"),
+        1 => top_level_elements.pop().unwrap(),
+        _ => {
+            let mut wrapper = Element::new("html");
+            wrapper.children = top_level_elements.into_iter().map(Node::Element).collect();
+            wrapper
+        }
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +178,12 @@ mod tests {
         let root = parse_document("just some free text, no tags at all");
         assert_eq!(root.tag_name, "html");
         assert!(root.children.is_empty());
+    }
+
+    #[test]
+    fn parse_document_wraps_multiple_top_level_elements_in_synthetic_html() {
+        let root = parse_document("<head><title>t</title></head><body><p>hi</p></body>");
+        assert_eq!(root.tag_name, "html");
+        assert_eq!(root.children.len(), 2);
     }
 }

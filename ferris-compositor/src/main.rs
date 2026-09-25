@@ -41,9 +41,13 @@ impl Default for App {
 
 fn build_page_frame(root: &ferris_dom::dom::Element, stylesheet: &ferris_css::stylesheet::Stylesheet, viewport_width: f32, viewport_height: f32) -> scene::Frame {
     let styled = resolve_styles(root, stylesheet);
-    let layout_box = layout::layout(&styled, viewport_width, viewport_height)
-        .expect("page root must not be display:none");
-    paint(&layout_box)
+    match layout::layout(&styled, viewport_width, viewport_height) {
+        Some(layout_box) => paint(&layout_box),
+        None => {
+            log::warn!("page root has no visible layout (display:none); showing an empty frame");
+            scene::Frame::default()
+        }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -62,10 +66,10 @@ impl ApplicationHandler for App {
             Some(gpu) => {
                 let loaded = match &self.source {
                     Some(source) => match ferris_loader::load_page(source) {
-                        Ok(page) => Some(page),
+                        Ok(page) => page,
                         Err(ferris_loader::LoadError::Fetch(msg)) => {
                             log::error!("failed to load page: {msg}");
-                            None
+                            std::process::exit(1);
                         }
                     },
                     None => {
@@ -74,14 +78,10 @@ impl ApplicationHandler for App {
                         let root = ferris_dom::parser::parse_document(html);
                         let css_tokens = CssTokenizer::tokenize(css);
                         let stylesheet = CssParser::parse(&css_tokens);
-                        Some((root, stylesheet))
+                        (root, stylesheet)
                     }
                 };
-
-                let Some((root, stylesheet)) = loaded else {
-                    event_loop.exit();
-                    return;
-                };
+                let (root, stylesheet) = loaded;
 
                 self.page_frame = Some(build_page_frame(&root, &stylesheet, gpu.logical_width(), gpu.logical_height()));
                 self.gpu = Some(gpu);
@@ -172,4 +172,21 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App { source, ..App::default() };
     event_loop.run_app(&mut app).expect("event loop error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Review Focus: display:none page root must not panic ---
+    #[test]
+    fn build_page_frame_on_display_none_root_returns_empty_frame_without_panicking() {
+        let root = ferris_dom::parser::parse_document("<html><body>oi</body></html>");
+        let css_tokens = CssTokenizer::tokenize("html { display: none; }");
+        let stylesheet = CssParser::parse(&css_tokens);
+
+        let frame = build_page_frame(&root, &stylesheet, 800.0, 600.0);
+
+        assert!(frame.commands.is_empty());
+    }
 }
