@@ -655,6 +655,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferris-text"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
