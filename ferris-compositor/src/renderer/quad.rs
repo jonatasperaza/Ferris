@@ -77,7 +77,7 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
 
 fn rounded_rect_sdf(local_pos: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
     let q = abs(local_pos) - half_size + vec2<f32>(radius, radius);
-    return length(max(q, vec2<f32>(0.0, 0.0))) - radius;
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0, 0.0))) - radius;
 }
 
 @fragment
