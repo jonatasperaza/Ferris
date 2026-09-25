@@ -17,6 +17,9 @@
     color: #222222;
     font-size: 18px;
 }
+#highlight {
+    color: #cc3333;
+}
 #card {
     margin-top: 16px;
     padding-top: 16px;

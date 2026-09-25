@@ -154,3 +154,36 @@ fn long_paragraph_in_a_narrow_box_wraps_into_multiple_text_commands() {
         "this is a long sentence that should not fit on a single line inside a very narrow box".split_whitespace().collect();
     assert_eq!(rejoined, original);
 }
+
+// --- Review Focus: an inline element's color must reach the painted output
+// distinctly from its surrounding text's color, through the real parser
+// pipeline end to end ---
+#[test]
+fn inline_element_color_differs_from_surrounding_text_through_real_pipeline() {
+    let html = r#"<div id="box"><p id="para">Hello <b id="bold">bold</b> world</p></div>"#;
+    let css = r#"
+        #box { width: 800px; }
+        #bold { color: red; }
+    "#;
+
+    let page = parse_root_element(html);
+    let stylesheet = parse_css(css);
+    let styled = resolve_styles(&page, &stylesheet);
+    let layout_box = layout(&styled, 1024.0, 768.0).unwrap();
+    let frame = paint(&layout_box);
+
+    let texts: Vec<_> = frame.commands.iter().filter_map(|c| match c {
+        DrawCommand::Text(t) => Some(t),
+        DrawCommand::Rect(_) => None,
+    }).collect();
+
+    assert_eq!(texts.len(), 3, "expected 3 runs: 'Hello ', 'bold', ' world'");
+    assert_eq!(texts[0].content, "Hello ");
+    assert_eq!(texts[0].color, [0.0, 0.0, 0.0, 1.0], "default black, no color set on #para");
+    assert_eq!(texts[1].content, "bold");
+    assert_eq!(texts[1].color, [1.0, 0.0, 0.0, 1.0], "#bold's own red color");
+    assert_eq!(texts[2].content, " world");
+    assert_eq!(texts[2].color, [0.0, 0.0, 0.0, 1.0], "back to black after the inline element");
+    assert!(texts[1].x > texts[0].x, "the bold run must start after the first run");
+    assert!(texts[2].x > texts[1].x, "the trailing run must start after the bold run");
+}
