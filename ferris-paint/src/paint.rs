@@ -21,7 +21,7 @@ fn paint_node(node: &LayoutBox, frame: &mut Frame) {
         frame.push(DrawCommand::Rect(RectCommand { x: bx, y: by, width: bw, height: bh, color, corner_radius: 0.0 }));
     }
 
-    let text: String = node
+    let raw_text: String = node
         .styled_node
         .element
         .children
@@ -31,11 +31,12 @@ fn paint_node(node: &LayoutBox, frame: &mut Frame) {
             Node::Comment(_) | Node::Element(_) => None,
         })
         .collect();
+    let text = raw_text.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    if !text.trim().is_empty() {
+    if !text.is_empty() {
         let size = match parse_length(node.styled_node.style.get("font-size").map(String::as_str)) {
-            Length::Px(n) => n,
-            Length::Percent(_) | Length::Auto => 16.0,
+            Length::Px(n) if n.is_finite() && n > 0.0 => n,
+            _ => 16.0,
         };
         let color = parse_color(node.styled_node.style.get("color").map(String::as_str))
             .unwrap_or([0.0, 0.0, 0.0, 1.0]);
@@ -180,6 +181,42 @@ mod tests {
         let frame_percent = paint(&node_percent);
         let DrawCommand::Text(text_percent) = &frame_percent.commands[0] else { panic!("expected text") };
         assert_eq!(text_percent.size, 16.0);
+    }
+
+    #[test]
+    fn font_size_zero_falls_back_to_sixteen() {
+        let mut element = Element::new("p");
+        element.children.push(Node::Text("Hi".to_string()));
+        let styled = StyledNode { element: &element, style: style_with(&[("font-size", "0px")]), children: Vec::new() };
+        let node = leaf_box(&styled, 0.0, 0.0, 100.0, 30.0, Edges::default());
+
+        let frame = paint(&node);
+        let DrawCommand::Text(text) = &frame.commands[0] else { panic!("expected text") };
+        assert_eq!(text.size, 16.0);
+    }
+
+    #[test]
+    fn font_size_negative_falls_back_to_sixteen() {
+        let mut element = Element::new("p");
+        element.children.push(Node::Text("Hi".to_string()));
+        let styled = StyledNode { element: &element, style: style_with(&[("font-size", "-12px")]), children: Vec::new() };
+        let node = leaf_box(&styled, 0.0, 0.0, 100.0, 30.0, Edges::default());
+
+        let frame = paint(&node);
+        let DrawCommand::Text(text) = &frame.commands[0] else { panic!("expected text") };
+        assert_eq!(text.size, 16.0);
+    }
+
+    #[test]
+    fn text_with_internal_newlines_and_indentation_is_collapsed_to_single_spaces() {
+        let mut element = Element::new("p");
+        element.children.push(Node::Text("\n        Hello\n        world\n    ".to_string()));
+        let styled = StyledNode { element: &element, style: HashMap::new(), children: Vec::new() };
+        let node = leaf_box(&styled, 0.0, 0.0, 100.0, 30.0, Edges::default());
+
+        let frame = paint(&node);
+        let DrawCommand::Text(text) = &frame.commands[0] else { panic!("expected text") };
+        assert_eq!(text.content, "Hello world");
     }
 
     #[test]

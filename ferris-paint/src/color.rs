@@ -12,11 +12,15 @@ pub fn parse_color(value: Option<&str>) -> Option<[f32; 4]> {
 }
 
 fn parse_hex(hex: &str) -> Option<[f32; 4]> {
-    let expanded: String = match hex.len() {
+    let expanded: String = match hex.chars().count() {
         3 => hex.chars().flat_map(|c| [c, c]).collect(),
         6 => hex.to_string(),
         _ => return None,
     };
+
+    if !expanded.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
 
     let r = u8::from_str_radix(&expanded[0..2], 16).ok()?;
     let g = u8::from_str_radix(&expanded[2..4], 16).ok()?;
@@ -96,6 +100,21 @@ mod tests {
     #[test]
     fn hex_invalid_characters_is_none() {
         assert_eq!(parse_color(Some("#zzzzzz")), None);
+    }
+
+    #[test]
+    fn hex_with_multibyte_characters_does_not_panic_and_is_none() {
+        // "é" and "€" are multibyte in UTF-8; a byte-index slice on these
+        // would previously panic with "byte index N is not a char boundary".
+        assert_eq!(parse_color(Some("#aéaaa")), None);
+        assert_eq!(parse_color(Some("#a€aa")), None);
+    }
+
+    #[test]
+    fn hex_with_leading_plus_sign_is_none() {
+        // u8::from_str_radix accepts a leading '+' (e.g. "+f" -> 15), which
+        // would otherwise let "#+f+f+f" parse as a valid color.
+        assert_eq!(parse_color(Some("#+f+f+f")), None);
     }
 
     #[test]
