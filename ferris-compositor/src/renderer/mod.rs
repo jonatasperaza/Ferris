@@ -129,6 +129,14 @@ impl Renderer {
         physical_to_logical(self.config.height as f32, self.scale_factor)
     }
 
+    /// The display's scale factor, e.g. `1.0` on a standard-DPI display or
+    /// `1.5`/`2.0` on a HiDPI one. Used to convert a physical cursor
+    /// position (from winit) into the logical-pixel coordinate space that
+    /// `Chrome::hit_test` and `Chrome::frame` operate in.
+    pub fn scale_factor(&self) -> f32 {
+        self.scale_factor
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;

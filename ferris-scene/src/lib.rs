@@ -54,7 +54,7 @@ pub enum DrawCommand {
     Text(TextCommand),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Frame {
     pub commands: Vec<DrawCommand>,
 }

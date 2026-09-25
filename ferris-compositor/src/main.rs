@@ -1,19 +1,20 @@
-use ferris_compositor::{perf, renderer, scene};
+use ferris_compositor::{chrome, perf, renderer, scene};
 
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use renderer::Renderer;
 
-use ferris_css::parser::Parser as CssParser;
-use ferris_css::tokenizer::Tokenizer as CssTokenizer;
 use ferris_layout::layout;
 use ferris_paint::paint::paint;
 use ferris_style::resolve_styles;
+
+use chrome::{Chrome, ChromeAction};
 
 struct App {
     window: Option<Arc<Window>>,
@@ -22,11 +23,14 @@ struct App {
     last_frame_start: Option<std::time::Instant>,
     occluded: bool,
     page_frame: Option<scene::Frame>,
-    source: Option<ferris_loader::Source>,
+    initial_source: ferris_loader::Source,
+    chrome: Option<Chrome>,
+    modifiers: ModifiersState,
+    cursor_position: (f32, f32),
 }
 
-impl Default for App {
-    fn default() -> Self {
+impl App {
+    fn new(initial_source: ferris_loader::Source) -> Self {
         Self {
             window: None,
             gpu: None,
@@ -34,8 +38,152 @@ impl Default for App {
             last_frame_start: None,
             occluded: false,
             page_frame: None,
-            source: None,
+            initial_source,
+            chrome: None,
+            modifiers: ModifiersState::empty(),
+            cursor_position: (0.0, 0.0),
         }
+    }
+
+    fn go_back(&mut self) {
+        let Some(chrome) = self.chrome.as_mut() else { return };
+        if let Some(source) = chrome.history.back().cloned() {
+            self.navigate_interactive(source);
+        }
+    }
+
+    fn go_forward(&mut self) {
+        let Some(chrome) = self.chrome.as_mut() else { return };
+        if let Some(source) = chrome.history.forward().cloned() {
+            self.navigate_interactive(source);
+        }
+    }
+
+    fn reload(&mut self) {
+        let Some(chrome) = self.chrome.as_ref() else { return };
+        let source = chrome.history.current().clone();
+        self.navigate_interactive(source);
+    }
+
+    /// Navega de forma interativa (fora do carregamento inicial): nunca
+    /// mata o processo em caso de falha, só mostra o erro na barra de
+    /// endereço. Não mexe no histórico — quem chama decide isso antes
+    /// (Voltar/Avançar já moveram o índice; Recarregar não move nada;
+    /// uma URL nova digitada já chamou `history.go` antes de chegar aqui).
+    fn navigate_interactive(&mut self, source: ferris_loader::Source) {
+        match ferris_loader::load_page(&source) {
+            Ok((root, stylesheet)) => {
+                if let (Some(gpu), Some(chrome)) = (&self.gpu, &self.chrome) {
+                    let height = gpu.logical_height() - chrome.bar_height;
+                    self.page_frame = Some(build_page_frame(&root, &stylesheet, gpu.logical_width(), height));
+                }
+                if let Some(chrome) = self.chrome.as_mut() {
+                    let text = chrome::source_display_text(&source);
+                    chrome.address_bar.set_text(&text);
+                }
+            }
+            Err(ferris_loader::LoadError::Fetch(msg)) => {
+                log::warn!("navigation failed: {msg}");
+                if let Some(chrome) = self.chrome.as_mut() {
+                    chrome.address_bar.set_error(Some(msg));
+                }
+            }
+        }
+    }
+
+    fn handle_keyboard_input(&mut self, event: &winit::event::KeyEvent) {
+        if event.state != ElementState::Pressed {
+            return;
+        }
+        let focused = self.chrome.as_ref().map(|c| c.address_bar.is_focused()).unwrap_or(false);
+        for intent in classify_key(&event.logical_key, self.modifiers, focused) {
+            match intent {
+                KeyIntent::FocusAddressBar => {
+                    if let Some(chrome) = self.chrome.as_mut() {
+                        chrome.address_bar.set_focused(true);
+                    }
+                }
+                KeyIntent::Back => self.go_back(),
+                KeyIntent::Forward => self.go_forward(),
+                KeyIntent::Reload => self.reload(),
+                KeyIntent::Commit => {
+                    let committed = self.chrome.as_mut().and_then(|c| c.address_bar.commit());
+                    if let Some(source) = committed {
+                        if let Some(chrome) = self.chrome.as_mut() {
+                            chrome.history.go(source.clone());
+                        }
+                        self.navigate_interactive(source);
+                    }
+                }
+                KeyIntent::Backspace => {
+                    if let Some(chrome) = self.chrome.as_mut() {
+                        chrome.address_bar.on_backspace();
+                    }
+                }
+                KeyIntent::Cancel => {
+                    if let Some(chrome) = self.chrome.as_mut() {
+                        let text = chrome::source_display_text(chrome.history.current());
+                        chrome.address_bar.cancel(&text);
+                    }
+                }
+                KeyIntent::Type(c) => {
+                    if let Some(chrome) = self.chrome.as_mut() {
+                        chrome.address_bar.on_char(c);
+                    }
+                }
+                KeyIntent::Ignore => {}
+            }
+        }
+    }
+}
+
+/// Uma intenção de teclado já classificada, independente de tipos do
+/// winit — mantém `classify_key` testável sem precisar construir um
+/// `KeyEvent` real (o winit não permite construir um fora do próprio
+/// crate: seu campo `platform_specific` é `pub(crate)`).
+#[derive(Debug, Clone, PartialEq)]
+enum KeyIntent {
+    FocusAddressBar,
+    Back,
+    Forward,
+    Reload,
+    Commit,
+    Backspace,
+    Cancel,
+    Type(char),
+    Ignore,
+}
+
+fn classify_key(logical_key: &Key, modifiers: ModifiersState, address_bar_focused: bool) -> Vec<KeyIntent> {
+    if modifiers.control_key() {
+        if let Key::Character(s) = logical_key {
+            if s.as_str().eq_ignore_ascii_case("l") {
+                return vec![KeyIntent::FocusAddressBar];
+            }
+        }
+        return vec![KeyIntent::Ignore];
+    }
+    if modifiers.alt_key() {
+        return match logical_key {
+            Key::Named(NamedKey::ArrowLeft) => vec![KeyIntent::Back],
+            Key::Named(NamedKey::ArrowRight) => vec![KeyIntent::Forward],
+            _ => vec![KeyIntent::Ignore],
+        };
+    }
+    if *logical_key == Key::Named(NamedKey::F5) {
+        return vec![KeyIntent::Reload];
+    }
+
+    if !address_bar_focused {
+        return vec![KeyIntent::Ignore];
+    }
+
+    match logical_key {
+        Key::Named(NamedKey::Enter) => vec![KeyIntent::Commit],
+        Key::Named(NamedKey::Backspace) => vec![KeyIntent::Backspace],
+        Key::Named(NamedKey::Escape) => vec![KeyIntent::Cancel],
+        Key::Character(s) => s.chars().map(KeyIntent::Type).collect(),
+        _ => vec![KeyIntent::Ignore],
     }
 }
 
@@ -64,26 +212,18 @@ impl ApplicationHandler for App {
         let uncapped = std::env::var("FERRIS_UNCAPPED").map(|v| v == "1").unwrap_or(false);
         match Renderer::new(window.clone(), scale_factor, uncapped) {
             Some(gpu) => {
-                let loaded = match &self.source {
-                    Some(source) => match ferris_loader::load_page(source) {
-                        Ok(page) => page,
-                        Err(ferris_loader::LoadError::Fetch(msg)) => {
-                            log::error!("failed to load page: {msg}");
-                            std::process::exit(1);
-                        }
-                    },
-                    None => {
-                        let html = include_str!("../assets/fixture.html");
-                        let css = include_str!("../assets/fixture.css");
-                        let root = ferris_dom::parser::parse_document(html);
-                        let css_tokens = CssTokenizer::tokenize(css);
-                        let stylesheet = CssParser::parse(&css_tokens);
-                        (root, stylesheet)
+                match ferris_loader::load_page(&self.initial_source) {
+                    Ok((root, stylesheet)) => {
+                        let chrome = Chrome::new(self.initial_source.clone(), chrome::source_display_text(&self.initial_source));
+                        let height = gpu.logical_height() - chrome.bar_height;
+                        self.page_frame = Some(build_page_frame(&root, &stylesheet, gpu.logical_width(), height));
+                        self.chrome = Some(chrome);
                     }
-                };
-                let (root, stylesheet) = loaded;
-
-                self.page_frame = Some(build_page_frame(&root, &stylesheet, gpu.logical_width(), gpu.logical_height()));
+                    Err(ferris_loader::LoadError::Fetch(msg)) => {
+                        log::error!("failed to load initial page: {msg}");
+                        std::process::exit(1);
+                    }
+                }
                 self.gpu = Some(gpu);
                 self.window = Some(window);
             }
@@ -95,11 +235,14 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(gpu) = self.gpu.as_mut() else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => gpu.resize(size.width, size.height),
+            WindowEvent::Resized(size) => {
+                let Some(gpu) = self.gpu.as_mut() else { return };
+                gpu.resize(size.width, size.height);
+            }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let Some(gpu) = self.gpu.as_mut() else { return };
                 gpu.set_scale_factor(scale_factor as f32);
             }
             WindowEvent::Occluded(occluded) => {
@@ -110,7 +253,38 @@ impl ApplicationHandler for App {
                     }
                 }
             }
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let Some(gpu) = self.gpu.as_ref() else { return };
+                let scale = gpu.scale_factor();
+                self.cursor_position = (position.x as f32 / scale, position.y as f32 / scale);
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                if self.gpu.is_none() {
+                    return;
+                }
+                let (x, y) = self.cursor_position;
+                let action = self.chrome.as_ref().and_then(|c| c.hit_test(x, y));
+                if let Some(chrome) = self.chrome.as_mut() {
+                    chrome.address_bar.set_focused(matches!(action, Some(ChromeAction::FocusAddressBar)));
+                }
+                match action {
+                    Some(ChromeAction::Back) => self.go_back(),
+                    Some(ChromeAction::Forward) => self.go_forward(),
+                    Some(ChromeAction::Reload) => self.reload(),
+                    Some(ChromeAction::FocusAddressBar) | None => {}
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if self.gpu.is_none() {
+                    return;
+                }
+                self.handle_keyboard_input(&event);
+            }
             WindowEvent::RedrawRequested => {
+                let Some(gpu) = self.gpu.as_mut() else { return };
                 let minimized = self.window.as_ref().and_then(|w| w.is_minimized()).unwrap_or(false);
                 if self.occluded || minimized {
                     self.last_frame_start = None;
@@ -123,7 +297,15 @@ impl ApplicationHandler for App {
                 }
                 self.last_frame_start = Some(now);
 
-                let mut frame = self.page_frame.clone().unwrap_or_default();
+                let page = self.page_frame.clone().unwrap_or_default();
+                let mut frame = match &self.chrome {
+                    Some(chrome) => {
+                        let mut f = chrome::translate_frame(&page, chrome.bar_height);
+                        f.commands.extend(chrome.frame(gpu.logical_width()).commands);
+                        f
+                    }
+                    None => page,
+                };
 
                 let overlay = format!(
                     "{:.1} fps | {:.2} ms/frame | budget {}",
@@ -167,26 +349,99 @@ impl ApplicationHandler for App {
 
 fn main() {
     env_logger::init();
-    let source = std::env::args().nth(1).map(|arg| ferris_loader::parse_source(&arg));
+    let initial_source = std::env::args()
+        .nth(1)
+        .map(|arg| ferris_loader::parse_source(&arg))
+        .unwrap_or_else(|| ferris_loader::Source::File(std::path::PathBuf::from("ferris-compositor/assets/fixture.html")));
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App { source, ..App::default() };
+    let mut app = App::new(initial_source);
     event_loop.run_app(&mut app).expect("event loop error");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use winit::keyboard::SmolStr;
 
     // --- Review Focus: display:none page root must not panic ---
     #[test]
     fn build_page_frame_on_display_none_root_returns_empty_frame_without_panicking() {
         let root = ferris_dom::parser::parse_document("<html><body>oi</body></html>");
-        let css_tokens = CssTokenizer::tokenize("html { display: none; }");
-        let stylesheet = CssParser::parse(&css_tokens);
+        let css_tokens = ferris_css::tokenizer::Tokenizer::tokenize("html { display: none; }");
+        let stylesheet = ferris_css::parser::Parser::parse(&css_tokens);
 
         let frame = build_page_frame(&root, &stylesheet, 800.0, 600.0);
 
         assert!(frame.commands.is_empty());
+    }
+
+    // --- Review Focus: interactive navigation failure never exits the process ---
+    #[test]
+    fn navigate_interactive_on_failure_sets_the_address_bar_error_without_touching_the_page_frame() {
+        let mut app = App::new(ferris_loader::Source::File(std::path::PathBuf::from("does-not-exist.html")));
+        app.chrome = Some(Chrome::new(app.initial_source.clone(), "does-not-exist.html".to_string()));
+        let previous_frame = app.page_frame.clone();
+
+        app.navigate_interactive(ferris_loader::Source::File(std::path::PathBuf::from("still-does-not-exist.html")));
+
+        assert_eq!(app.page_frame, previous_frame, "a failed navigation must not touch the cached page frame");
+        let error = app.chrome.as_ref().unwrap().address_bar.error().map(str::to_string);
+        assert!(error.is_some(), "a failed navigation must set a visible error on the address bar");
+    }
+
+    // --- Review Focus: shortcuts work regardless of focus; Ctrl+L never leaks "l" ---
+    #[test]
+    fn classify_key_ctrl_l_focuses_the_address_bar_and_does_not_type() {
+        let key = Key::Character(SmolStr::new("l"));
+        let intents = classify_key(&key, ModifiersState::CONTROL, false);
+        assert_eq!(intents, vec![KeyIntent::FocusAddressBar]);
+    }
+
+    #[test]
+    fn classify_key_ctrl_plus_other_letter_is_ignored_not_typed() {
+        let key = Key::Character(SmolStr::new("c"));
+        let intents = classify_key(&key, ModifiersState::CONTROL, true);
+        assert_eq!(intents, vec![KeyIntent::Ignore]);
+    }
+
+    #[test]
+    fn classify_key_alt_left_is_back_even_when_unfocused() {
+        let key = Key::Named(NamedKey::ArrowLeft);
+        let intents = classify_key(&key, ModifiersState::ALT, false);
+        assert_eq!(intents, vec![KeyIntent::Back]);
+    }
+
+    #[test]
+    fn classify_key_alt_right_is_forward() {
+        let key = Key::Named(NamedKey::ArrowRight);
+        let intents = classify_key(&key, ModifiersState::ALT, false);
+        assert_eq!(intents, vec![KeyIntent::Forward]);
+    }
+
+    #[test]
+    fn classify_key_f5_is_reload_regardless_of_focus() {
+        let key = Key::Named(NamedKey::F5);
+        assert_eq!(classify_key(&key, ModifiersState::empty(), false), vec![KeyIntent::Reload]);
+        assert_eq!(classify_key(&key, ModifiersState::empty(), true), vec![KeyIntent::Reload]);
+    }
+
+    #[test]
+    fn classify_key_enter_backspace_escape_only_act_when_focused() {
+        let empty_mods = ModifiersState::empty();
+        assert_eq!(classify_key(&Key::Named(NamedKey::Enter), empty_mods, false), vec![KeyIntent::Ignore]);
+        assert_eq!(classify_key(&Key::Named(NamedKey::Enter), empty_mods, true), vec![KeyIntent::Commit]);
+        assert_eq!(classify_key(&Key::Named(NamedKey::Backspace), empty_mods, false), vec![KeyIntent::Ignore]);
+        assert_eq!(classify_key(&Key::Named(NamedKey::Backspace), empty_mods, true), vec![KeyIntent::Backspace]);
+        assert_eq!(classify_key(&Key::Named(NamedKey::Escape), empty_mods, false), vec![KeyIntent::Ignore]);
+        assert_eq!(classify_key(&Key::Named(NamedKey::Escape), empty_mods, true), vec![KeyIntent::Cancel]);
+    }
+
+    #[test]
+    fn classify_key_character_types_only_when_focused() {
+        let key = Key::Character(SmolStr::new("z"));
+        let empty_mods = ModifiersState::empty();
+        assert_eq!(classify_key(&key, empty_mods, false), vec![KeyIntent::Ignore]);
+        assert_eq!(classify_key(&key, empty_mods, true), vec![KeyIntent::Type('z')]);
     }
 }
