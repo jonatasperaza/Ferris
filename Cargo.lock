@@ -636,6 +636,7 @@ dependencies = [
  "ferris-css",
  "ferris-dom",
  "ferris-layout",
+ "ferris-loader",
  "ferris-paint",
  "ferris-scene",
  "ferris-style",

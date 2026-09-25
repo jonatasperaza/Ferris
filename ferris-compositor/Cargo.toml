@@ -17,3 +17,4 @@ ferris-style = { path = "../ferris-style" }
 ferris-layout = { path = "../ferris-layout" }
 ferris-paint = { path = "../ferris-paint" }
 ferris-scene = { path = "../ferris-scene" }
+ferris-loader = { path = "../ferris-loader" }

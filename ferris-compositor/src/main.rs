@@ -11,9 +11,6 @@ use renderer::Renderer;
 
 use ferris_css::parser::Parser as CssParser;
 use ferris_css::tokenizer::Tokenizer as CssTokenizer;
-use ferris_dom::dom::Node;
-use ferris_dom::parser::Parser as DomParser;
-use ferris_dom::tokenizer::Tokenizer as DomTokenizer;
 use ferris_layout::layout;
 use ferris_paint::paint::paint;
 use ferris_style::resolve_styles;
@@ -25,6 +22,7 @@ struct App {
     last_frame_start: Option<std::time::Instant>,
     occluded: bool,
     page_frame: Option<scene::Frame>,
+    source: Option<ferris_loader::Source>,
 }
 
 impl Default for App {
@@ -36,34 +34,15 @@ impl Default for App {
             last_frame_start: None,
             occluded: false,
             page_frame: None,
+            source: None,
         }
     }
 }
 
-fn build_page_frame(viewport_width: f32, viewport_height: f32) -> scene::Frame {
-    let html = include_str!("../assets/fixture.html");
-    let css = include_str!("../assets/fixture.css");
-
-    let html_tokens = DomTokenizer::tokenize(html);
-    let Node::Element(document) = DomParser::parse(&html_tokens) else {
-        panic!("fixture.html: expected a document element");
-    };
-    let root = document
-        .children
-        .into_iter()
-        .find_map(|child| match child {
-            Node::Element(el) => Some(el),
-            Node::Text(_) | Node::Comment(_) => None,
-        })
-        .expect("fixture.html: expected at least one root element");
-
-    let css_tokens = CssTokenizer::tokenize(css);
-    let stylesheet = CssParser::parse(&css_tokens);
-
-    let styled = resolve_styles(&root, &stylesheet);
+fn build_page_frame(root: &ferris_dom::dom::Element, stylesheet: &ferris_css::stylesheet::Stylesheet, viewport_width: f32, viewport_height: f32) -> scene::Frame {
+    let styled = resolve_styles(root, stylesheet);
     let layout_box = layout::layout(&styled, viewport_width, viewport_height)
-        .expect("fixture.html's root must not be display:none");
-
+        .expect("page root must not be display:none");
     paint(&layout_box)
 }
 
@@ -81,7 +60,30 @@ impl ApplicationHandler for App {
         let uncapped = std::env::var("FERRIS_UNCAPPED").map(|v| v == "1").unwrap_or(false);
         match Renderer::new(window.clone(), scale_factor, uncapped) {
             Some(gpu) => {
-                self.page_frame = Some(build_page_frame(gpu.logical_width(), gpu.logical_height()));
+                let loaded = match &self.source {
+                    Some(source) => match ferris_loader::load_page(source) {
+                        Ok(page) => Some(page),
+                        Err(ferris_loader::LoadError::Fetch(msg)) => {
+                            log::error!("failed to load page: {msg}");
+                            None
+                        }
+                    },
+                    None => {
+                        let html = include_str!("../assets/fixture.html");
+                        let css = include_str!("../assets/fixture.css");
+                        let root = ferris_dom::parser::parse_document(html);
+                        let css_tokens = CssTokenizer::tokenize(css);
+                        let stylesheet = CssParser::parse(&css_tokens);
+                        Some((root, stylesheet))
+                    }
+                };
+
+                let Some((root, stylesheet)) = loaded else {
+                    event_loop.exit();
+                    return;
+                };
+
+                self.page_frame = Some(build_page_frame(&root, &stylesheet, gpu.logical_width(), gpu.logical_height()));
                 self.gpu = Some(gpu);
                 self.window = Some(window);
             }
@@ -165,8 +167,9 @@ impl ApplicationHandler for App {
 
 fn main() {
     env_logger::init();
+    let source = std::env::args().nth(1).map(|arg| ferris_loader::parse_source(&arg));
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App::default();
+    let mut app = App { source, ..App::default() };
     event_loop.run_app(&mut app).expect("event loop error");
 }
