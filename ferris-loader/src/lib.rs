@@ -331,6 +331,17 @@ mod tests {
     }
 
     #[test]
+    fn extract_images_skips_a_malformed_data_uri_without_panicking() {
+        let html = r#"<html><body><img src="data:image/png;base64,not-valid-base64!!!"></body></html>"#;
+        let root = ferris_dom::parser::parse_document(html);
+        let base = Source::File(std::path::PathBuf::from("/irrelevant/page.html"));
+
+        let images = extract_images(&root, &base);
+
+        assert!(images.is_empty(), "a malformed data: URI must be skipped, same as any other decode failure");
+    }
+
+    #[test]
     fn extract_images_skips_a_missing_file_without_propagating_error() {
         let html_path = write_temp_file("page_task2_c.html", "");
         let html = r#"<html><body><img src="does-not-exist-anywhere.png"><p>still here</p></body></html>"#;
