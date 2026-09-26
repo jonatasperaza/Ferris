@@ -283,6 +283,24 @@ fn classify_key(logical_key: &Key, modifiers: ModifiersState, address_bar_focuse
     }
 }
 
+/// Texto mais curto e apropriado pra exibir como título de uma aba na
+/// tira: o nome do arquivo (não o caminho inteiro) pra `Source::File`,
+/// o host (não a URL inteira) pra `Source::Url`. Diferente de
+/// `chrome::source_display_text`, que devolve o texto completo — usado
+/// na barra de endereço, onde o caminho/URL inteiro é o que se espera.
+fn tab_title(source: &ferris_loader::Source) -> String {
+    match source {
+        ferris_loader::Source::File(path) => path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| chrome::source_display_text(source)),
+        ferris_loader::Source::Url(url) => {
+            let without_scheme = url.trim_start_matches("https://").trim_start_matches("http://");
+            without_scheme.split('/').next().unwrap_or(without_scheme).to_string()
+        }
+    }
+}
+
 fn build_page_frame(root: &ferris_dom::dom::Element, stylesheet: &ferris_css::stylesheet::Stylesheet, viewport_width: f32, viewport_height: f32) -> scene::Frame {
     let styled = resolve_styles(root, stylesheet);
     match layout::layout(&styled, viewport_width, viewport_height) {
@@ -411,23 +429,25 @@ impl ApplicationHandler for App {
                     .tabs
                     .iter()
                     .map(|t| match t.chrome.history.as_ref() {
-                        Some(history) => chrome::source_display_text(history.current()),
+                        Some(history) => tab_title(history.current()),
                         None => "Nova aba".to_string(),
                     })
                     .collect();
 
-                let mut frame = self.tab_strip.frame(&titles, self.active_tab, window_width);
                 let mut bar_height = 0.0;
+                let mut frame = scene::Frame::default();
 
                 if let Some(tab) = self.tabs.get(self.active_tab) {
                     bar_height = tab.chrome.bar_height;
-                    let bar_frame = tab.chrome.frame(window_width);
-                    frame.commands.extend(chrome::translate_frame(&bar_frame, self.tab_strip.height).commands);
-
                     let page = tab.page_frame.clone().unwrap_or_default();
                     let page_dy = self.tab_strip.height + bar_height;
-                    frame.commands.extend(chrome::translate_frame(&page, page_dy).commands);
+                    frame = chrome::translate_frame(&page, page_dy);
+
+                    let bar_frame = tab.chrome.frame(window_width);
+                    frame.commands.extend(chrome::translate_frame(&bar_frame, self.tab_strip.height).commands);
                 }
+
+                frame.commands.extend(self.tab_strip.frame(&titles, self.active_tab, window_width).commands);
 
                 let overlay_y = self.tab_strip.height + bar_height + 6.0;
                 let overlay = format!(
@@ -560,6 +580,44 @@ mod tests {
 
         assert!(app.tabs[0].chrome.history.is_some(), "the first successful navigation from a blank tab must create its history");
         assert_eq!(app.tabs[0].chrome.history.as_ref().unwrap().current(), &ferris_loader::Source::File(path));
+    }
+
+    // --- Final whole-branch review: a failed navigation from a blank tab must keep history: None ---
+    #[test]
+    fn commit_address_bar_on_a_blank_tab_failed_navigation_keeps_history_none() {
+        let mut app = App::new(file("does-not-exist-anywhere.html"));
+        app.tabs.push(Tab { chrome: Chrome::new_blank(), page_frame: None });
+
+        app.tabs[0].chrome.address_bar.set_focused(true);
+        for c in "does-not-exist-anywhere.html".chars() {
+            app.tabs[0].chrome.address_bar.on_char(c);
+        }
+        app.commit_address_bar();
+
+        assert!(
+            app.tabs[0].chrome.history.is_none(),
+            "a failed navigation from a blank tab must not create any history at all"
+        );
+    }
+
+    // --- Final whole-branch review: tab-strip titles must not collide between different tabs ---
+    #[test]
+    fn tab_title_for_file_shows_only_the_file_name() {
+        let source = ferris_loader::Source::File(std::path::PathBuf::from("C:\\pages\\a.html"));
+        assert_eq!(tab_title(&source), "a.html");
+    }
+
+    #[test]
+    fn tab_title_distinguishes_files_in_the_same_directory() {
+        let a = ferris_loader::Source::File(std::path::PathBuf::from("C:\\pages\\a.html"));
+        let b = ferris_loader::Source::File(std::path::PathBuf::from("C:\\pages\\b.html"));
+        assert_ne!(tab_title(&a), tab_title(&b));
+    }
+
+    #[test]
+    fn tab_title_for_url_shows_only_the_host() {
+        let source = ferris_loader::Source::Url("https://example.com/some/deep/path.html".to_string());
+        assert_eq!(tab_title(&source), "example.com");
     }
 
     // --- Review Focus: closing a tab must leave a valid tab active ---
