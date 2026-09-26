@@ -153,7 +153,7 @@ impl Renderer {
         self.scale_factor = factor;
     }
 
-    pub fn render_frame(&mut self, frame: &scene::Frame) -> Result<(), wgpu::SurfaceError> {
+    pub fn render_frame(&mut self, frame: &scene::Frame, content_top: f32) -> Result<(), wgpu::SurfaceError> {
         let instances = quad::build_quad_instances(frame, self.scale_factor);
         self.quad_pipeline.prepare(&self.device, &self.queue, &instances, self.config.width as f32, self.config.height as f32);
 
@@ -186,7 +186,9 @@ impl Renderer {
             });
             self.quad_pipeline.render(&mut pass, instances.len() as u32);
             self.text_layer.render(&mut pass);
-            self.image_pipeline.render(&mut pass);
+            let scissor_y = ((content_top * self.scale_factor).round() as u32).min(self.config.height);
+            let scissor_height = self.config.height.saturating_sub(scissor_y);
+            self.image_pipeline.render(&mut pass, Some((0, scissor_y, self.config.width, scissor_height)));
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();

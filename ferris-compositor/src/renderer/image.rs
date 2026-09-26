@@ -21,13 +21,14 @@ struct Globals {
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
+@group(1) @binding(0) var image_texture: texture_2d<f32>;
+@group(1) @binding(1) var image_sampler: sampler;
+
 struct ImageUniform {
     position: vec2<f32>,
     size: vec2<f32>,
 };
-@group(1) @binding(0) var<uniform> image_uniform: ImageUniform;
-@group(1) @binding(1) var image_texture: texture_2d<f32>;
-@group(1) @binding(2) var image_sampler: sampler;
+@group(2) @binding(0) var<uniform> image_uniform: ImageUniform;
 
 struct VertexInput {
     @location(0) corner: vec2<f32>,
@@ -69,9 +70,25 @@ pub fn build_image_instances(frame: &Frame, scale_factor: f32) -> Vec<ImageComma
         .collect()
 }
 
-struct CachedImage {
-    position_buffer: wgpu::Buffer,
+/// A GPU texture uploaded for one unique decoded image, cached by the
+/// identity of its `Arc<[u8]>` pointer. Holding `_rgba` here (not just the
+/// pointer as a key) keeps that exact allocation alive for as long as this
+/// entry is cached — without it, a freed allocation's address could be
+/// reused by an unrelated new image and silently alias onto this stale
+/// texture (a real bug confirmed by cycling through repeated navigations).
+struct CachedTexture {
+    _rgba: std::sync::Arc<[u8]>,
     bind_group: wgpu::BindGroup,
+}
+
+/// One draw call's worth of state: which cached texture to bind, and this
+/// draw's own position/size uniform — kept separate from `CachedTexture` so
+/// two `ImageCommand`s that share the same underlying image (the same
+/// `src` used twice) each get their own position instead of silently
+/// overwriting each other's.
+struct DrawInstance {
+    position_bind_group: wgpu::BindGroup,
+    texture_key: usize,
 }
 
 pub struct ImagePipeline {
@@ -80,9 +97,10 @@ pub struct ImagePipeline {
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
     texture_bind_group_layout: wgpu::BindGroupLayout,
+    position_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    cache: std::collections::HashMap<usize, CachedImage>,
-    draw_order: Vec<usize>,
+    texture_cache: std::collections::HashMap<usize, CachedTexture>,
+    draws: Vec<DrawInstance>,
 }
 
 impl ImagePipeline {
@@ -126,12 +144,6 @@ impl ImagePipeline {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -141,12 +153,22 @@ impl ImagePipeline {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 2,
+                    binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
+        });
+
+        let position_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("image_position_layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                count: None,
+            }],
         });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -158,7 +180,7 @@ impl ImagePipeline {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("image_pipeline_layout"),
-            bind_group_layouts: &[&globals_bind_group_layout, &texture_bind_group_layout],
+            bind_group_layouts: &[&globals_bind_group_layout, &texture_bind_group_layout, &position_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -200,19 +222,19 @@ impl ImagePipeline {
             globals_buffer,
             globals_bind_group,
             texture_bind_group_layout,
+            position_bind_group_layout,
             sampler,
-            cache: std::collections::HashMap::new(),
-            draw_order: Vec::new(),
+            texture_cache: std::collections::HashMap::new(),
+            draws: Vec::new(),
         }
     }
 
     /// Uploads a GPU texture for `image` the first time this exact `Arc`
     /// pointer is seen; later calls with the same pointer (same decoded
-    /// image, still alive in the current page's `Frame`) reuse it. Returns
-    /// the cache key so `prepare` can update just the position uniform.
-    fn get_or_create(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &DecodedImage) -> usize {
+    /// image, still alive in the current page's `Frame`) reuse it.
+    fn get_or_create_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &DecodedImage) -> usize {
         let key = std::sync::Arc::as_ptr(&image.rgba) as *const u8 as usize;
-        if !self.cache.contains_key(&key) {
+        if !self.texture_cache.contains_key(&key) {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("image_texture"),
                 size: wgpu::Extent3d { width: image.width, height: image.height, depth_or_array_layers: 1 },
@@ -230,25 +252,15 @@ impl ImagePipeline {
                 wgpu::Extent3d { width: image.width, height: image.height, depth_or_array_layers: 1 },
             );
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-            let position_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("image_position_buffer"),
-                size: std::mem::size_of::<ImageUniform>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("image_texture_bind_group"),
                 layout: &self.texture_bind_group_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: position_buffer.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 ],
             });
-
-            self.cache.insert(key, CachedImage { position_buffer, bind_group });
+            self.texture_cache.insert(key, CachedTexture { _rgba: image.rgba.clone(), bind_group });
         }
         key
     }
@@ -256,25 +268,63 @@ impl ImagePipeline {
     pub fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Frame, scale_factor: f32, viewport_width: f32, viewport_height: f32) {
         queue.write_buffer(&self.globals_buffer, 0, bytemuck::cast_slice(&[viewport_width, viewport_height]));
 
-        self.draw_order.clear();
-        for scaled in build_image_instances(frame, scale_factor) {
-            let key = self.get_or_create(device, queue, &scaled.image);
-            let cached = self.cache.get(&key).expect("just inserted or already present");
-            queue.write_buffer(&cached.position_buffer, 0, bytemuck::cast_slice(&[scaled.x, scaled.y, scaled.width, scaled.height]));
-            self.draw_order.push(key);
+        let instances = build_image_instances(frame, scale_factor);
+
+        // Evict any cached texture not referenced by this frame — a page's
+        // images are decoded fresh on every navigation, so a stale entry
+        // here can only be leftover from a PREVIOUS page. Dropping it frees
+        // the GPU texture and this pipeline's own clone of its Arc, closing
+        // both the stale-texture-aliasing bug and the unbounded GPU memory
+        // growth across navigations.
+        let live_keys: std::collections::HashSet<usize> = instances
+            .iter()
+            .map(|img| std::sync::Arc::as_ptr(&img.image.rgba) as *const u8 as usize)
+            .collect();
+        self.texture_cache.retain(|key, _| live_keys.contains(key));
+
+        self.draws.clear();
+        for scaled in instances {
+            let texture_key = self.get_or_create_texture(device, queue, &scaled.image);
+
+            let uniform = ImageUniform { position: [scaled.x, scaled.y], size: [scaled.width, scaled.height] };
+            let position_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("image_position_buffer"),
+                contents: bytemuck::cast_slice(&[uniform]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let position_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("image_position_bind_group"),
+                layout: &self.position_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: position_buffer.as_entire_binding() }],
+            });
+
+            self.draws.push(DrawInstance { position_bind_group, texture_key });
         }
     }
 
-    pub fn render<'pass>(&'pass self, render_pass: &mut wgpu::RenderPass<'pass>) {
-        if self.draw_order.is_empty() {
+    /// `scissor`, when given, is `(x, y, width, height)` in PHYSICAL pixels
+    /// — the region images are allowed to draw into. Used to keep a page
+    /// image from ever visually covering the browser's own chrome (tab
+    /// strip + address bar), regardless of what CSS positioning the page
+    /// applies to it — confirmed as a real bug (a negative-margin image
+    /// painting over the real address bar) before this fix.
+    pub fn render<'pass>(&'pass self, render_pass: &mut wgpu::RenderPass<'pass>, scissor: Option<(u32, u32, u32, u32)>) {
+        if self.draws.is_empty() {
             return;
+        }
+        if let Some((x, y, width, height)) = scissor {
+            if width == 0 || height == 0 {
+                return;
+            }
+            render_pass.set_scissor_rect(x, y, width, height);
         }
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        for key in &self.draw_order {
-            let cached = self.cache.get(key).expect("draw_order only contains keys inserted this frame");
+        for draw in &self.draws {
+            let cached = self.texture_cache.get(&draw.texture_key).expect("evicted only entries absent from this frame's draws");
             render_pass.set_bind_group(1, &cached.bind_group, &[]);
+            render_pass.set_bind_group(2, &draw.position_bind_group, &[]);
             render_pass.draw(0..6, 0..1);
         }
     }

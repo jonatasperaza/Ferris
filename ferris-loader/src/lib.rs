@@ -19,6 +19,19 @@ pub fn parse_source(arg: &str) -> Source {
 }
 
 fn resolve_href(base: &Source, href: &str) -> Option<Source> {
+    // Um href que já é uma URL absoluta http(s), ou relativo a protocolo
+    // (`//host/...`), resolve direto pra essa URL/host, independente do
+    // tipo de base contra a qual está sendo resolvido — uma página local
+    // referenciando um recurso externo absoluto é um caso comum e normal,
+    // não deveria ser confundido com um caminho de arquivo relativo (o que
+    // fazia `//host/path` virar um caminho UNC do Windows e tentar uma
+    // leitura SMB implícita contra um host arbitrário — rejeitado aqui).
+    if href.starts_with("http://") || href.starts_with("https://") {
+        return Some(Source::Url(href.to_string()));
+    }
+    if href.starts_with("//") {
+        return None;
+    }
     match base {
         Source::File(path) => {
             let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -107,6 +120,24 @@ fn fetch_bytes(source: &Source) -> Result<Vec<u8>, LoadError> {
     }
 }
 
+/// GPUs comumente limitam uma única dimensão de textura 2D a 8192px; este
+/// projeto usa um teto confortavelmente abaixo disso, pra uma imagem
+/// enorme (um infográfico comprido, uma sprite sheet) degradar pra uma
+/// cópia redimensionada em vez de derrubar o renderizador inteiro. A
+/// proporção é preservada.
+const MAX_IMAGE_DIMENSION: u32 = 4096;
+
+fn downscale_if_too_large(image: image::RgbaImage) -> image::RgbaImage {
+    let (width, height) = (image.width(), image.height());
+    if width <= MAX_IMAGE_DIMENSION && height <= MAX_IMAGE_DIMENSION {
+        return image;
+    }
+    let scale = (MAX_IMAGE_DIMENSION as f32 / width.max(height) as f32).min(1.0);
+    let new_width = ((width as f32 * scale).round() as u32).max(1);
+    let new_height = ((height as f32 * scale).round() as u32).max(1);
+    image::imageops::resize(&image, new_width, new_height, image::imageops::FilterType::Triangle)
+}
+
 /// Decodes a `data:image/...;base64,<...>` URI directly, with no fetch at
 /// all. Returns `None` for anything that doesn't parse as base64 after the
 /// `base64,` marker — malformed `data:` URIs degrade the same as any other
@@ -134,12 +165,14 @@ fn collect_images(el: &Element, base: &Source, images: &mut ferris_scene::ImageM
                 };
                 if let Some(bytes) = bytes {
                     if let Ok(decoded) = image::load_from_memory(&bytes) {
-                        let rgba_image = decoded.to_rgba8();
+                        let rgba_image = downscale_if_too_large(decoded.to_rgba8());
                         let (width, height) = (rgba_image.width(), rgba_image.height());
-                        images.insert(
-                            src.clone(),
-                            ferris_scene::DecodedImage { width, height, rgba: std::sync::Arc::from(rgba_image.into_raw()) },
-                        );
+                        if width > 0 && height > 0 {
+                            images.insert(
+                                src.clone(),
+                                ferris_scene::DecodedImage { width, height, rgba: std::sync::Arc::from(rgba_image.into_raw()) },
+                            );
+                        }
                     }
                 }
             }
@@ -218,6 +251,26 @@ mod tests {
     fn resolve_href_url_base_malformed_href_returns_none() {
         let base = Source::Url("not a valid url at all".to_string());
         assert!(resolve_href(&base, "style.css").is_none());
+    }
+
+    #[test]
+    fn resolve_href_file_base_absolute_http_href_resolves_to_the_url_not_a_path() {
+        let base = Source::File(PathBuf::from("/pages/index.html"));
+        let resolved = resolve_href(&base, "http://example.com/style.css").unwrap();
+        assert_eq!(resolved, Source::Url("http://example.com/style.css".to_string()));
+    }
+
+    #[test]
+    fn resolve_href_file_base_absolute_https_href_resolves_to_the_url_not_a_path() {
+        let base = Source::File(PathBuf::from("/pages/index.html"));
+        let resolved = resolve_href(&base, "https://example.com/style.css").unwrap();
+        assert_eq!(resolved, Source::Url("https://example.com/style.css".to_string()));
+    }
+
+    #[test]
+    fn resolve_href_protocol_relative_href_is_rejected_not_treated_as_a_unc_path() {
+        let base = Source::File(PathBuf::from("/pages/index.html"));
+        assert_eq!(resolve_href(&base, "//example.com/style.css"), None);
     }
 
     fn write_temp_file(name: &str, contents: &str) -> PathBuf {
@@ -389,6 +442,24 @@ mod tests {
         let images = extract_images(&root, &base);
 
         assert_eq!(images.len(), 1, "two tags with the same src must produce exactly one map entry");
+    }
+
+    #[test]
+    fn collect_images_downscales_an_oversized_image_instead_of_crashing() {
+        let img = image::RgbaImage::from_pixel(9000, 20, image::Rgba([10, 20, 30, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        let png_path = write_temp_file_bytes("image_fixwave_huge.png", &buf.into_inner());
+        let html_path = write_temp_file("page_fixwave_huge.html", "");
+        let html = format!(r#"<html><body><img src="{}"></body></html>"#, png_path.file_name().unwrap().to_str().unwrap());
+        let root = ferris_dom::parser::parse_document(&html);
+        let base = Source::File(html_path);
+
+        let images = extract_images(&root, &base);
+
+        let decoded = images.get(png_path.file_name().unwrap().to_str().unwrap()).expect("must still decode, just downscaled");
+        assert!(decoded.width <= 4096 && decoded.height <= 4096, "must be capped under the GPU's texture size limit");
+        assert!(decoded.width > decoded.height, "aspect ratio must be roughly preserved (source was much wider than tall)");
     }
 
     #[test]

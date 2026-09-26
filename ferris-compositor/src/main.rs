@@ -460,7 +460,7 @@ impl ApplicationHandler for App {
                     x: 20.0, y: overlay_y, content: overlay, size: 18.0, color: [1.0, 0.9, 0.3, 1.0],
                 }));
 
-                match gpu.render_frame(&frame) {
+                match gpu.render_frame(&frame, self.tab_strip.height + bar_height) {
                     Ok(()) => {}
                     Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                         let (w, h) = (gpu.width(), gpu.height());
