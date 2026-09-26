@@ -1,4 +1,4 @@
-pub use ferris_scene::{DrawCommand, Frame, RectCommand, TextCommand};
+pub use ferris_scene::{DecodedImage, DrawCommand, Frame, ImageCommand, RectCommand, TextCommand};
 
 pub fn bounce_position(elapsed_secs: f32, speed: f32, min: f32, max: f32, phase_offset: f32) -> f32 {
     let range = max - min;

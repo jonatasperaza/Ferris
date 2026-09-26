@@ -1,3 +1,4 @@
+pub mod image;
 pub mod quad;
 pub mod text;
 
@@ -35,6 +36,7 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     quad_pipeline: quad::QuadPipeline,
     text_layer: text::TextLayer,
+    image_pipeline: image::ImagePipeline,
     scale_factor: f32,
 }
 
@@ -103,8 +105,9 @@ impl Renderer {
 
         let quad_pipeline = quad::QuadPipeline::new(&device, format);
         let text_layer = text::TextLayer::new(&device, &queue, format);
+        let image_pipeline = image::ImagePipeline::new(&device, format);
 
-        Some(Self { surface, device, queue, config, quad_pipeline, text_layer, scale_factor })
+        Some(Self { surface, device, queue, config, quad_pipeline, text_layer, image_pipeline, scale_factor })
     }
 
     /// Physical pixel width of the surface.
@@ -156,9 +159,10 @@ impl Renderer {
 
         let texts: Vec<scene::TextCommand> = frame.commands.iter().filter_map(|c| match c {
             scene::DrawCommand::Text(t) => Some(t.scaled(self.scale_factor)),
-            scene::DrawCommand::Rect(_) => None,
+            scene::DrawCommand::Rect(_) | scene::DrawCommand::Image(_) => None,
         }).collect();
         self.text_layer.prepare(&self.device, &self.queue, self.config.width, self.config.height, &texts);
+        self.image_pipeline.prepare(&self.device, &self.queue, frame, self.scale_factor, self.config.width as f32, self.config.height as f32);
 
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -182,6 +186,7 @@ impl Renderer {
             });
             self.quad_pipeline.render(&mut pass, instances.len() as u32);
             self.text_layer.render(&mut pass);
+            self.image_pipeline.render(&mut pass);
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();

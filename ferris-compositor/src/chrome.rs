@@ -334,6 +334,7 @@ pub fn translate_frame(frame: &scene::Frame, dy: f32) -> scene::Frame {
         .map(|cmd| match cmd {
             scene::DrawCommand::Rect(r) => scene::DrawCommand::Rect(scene::RectCommand { y: r.y + dy, ..*r }),
             scene::DrawCommand::Text(t) => scene::DrawCommand::Text(scene::TextCommand { y: t.y + dy, ..t.clone() }),
+            scene::DrawCommand::Image(i) => scene::DrawCommand::Image(scene::ImageCommand { y: i.y + dy, ..i.clone() }),
         })
         .collect();
     scene::Frame { commands }

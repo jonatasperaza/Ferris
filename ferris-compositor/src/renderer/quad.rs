@@ -26,7 +26,7 @@ pub fn build_quad_instances(frame: &Frame, scale_factor: f32) -> Vec<QuadInstanc
                     corner_radius: scaled.corner_radius,
                 })
             }
-            DrawCommand::Text(_) => None,
+            DrawCommand::Text(_) | DrawCommand::Image(_) => None,
         })
         .collect()
 }
