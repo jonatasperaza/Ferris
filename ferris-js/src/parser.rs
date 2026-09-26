@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::tokenizer::{Keyword, Punct, Token};
+use crate::tokenizer::{Keyword, Op, Punct, Token};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
@@ -78,7 +78,162 @@ impl<'a> ParserState<'a> {
     }
 
     fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_call_member()
+        self.parse_assignment()
+    }
+
+    fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
+        let left = self.parse_conditional()?;
+        let op = match self.peek() {
+            Token::Op(Op::Assign) => Some(AssignOp::Assign),
+            Token::Op(Op::PlusEq) => Some(AssignOp::AddAssign),
+            Token::Op(Op::MinusEq) => Some(AssignOp::SubAssign),
+            Token::Op(Op::StarEq) => Some(AssignOp::MulAssign),
+            Token::Op(Op::SlashEq) => Some(AssignOp::DivAssign),
+            _ => None,
+        };
+        match op {
+            Some(op) => {
+                self.advance();
+                let value = self.parse_assignment()?;
+                Ok(Expr::Assignment { op, target: Box::new(left), value: Box::new(value) })
+            }
+            None => Ok(left),
+        }
+    }
+
+    fn parse_conditional(&mut self) -> Result<Expr, ParseError> {
+        let test = self.parse_logical_or()?;
+        if *self.peek() == Token::Punct(Punct::Question) {
+            self.advance();
+            let consequent = self.parse_assignment()?;
+            self.expect_punct(Punct::Colon)?;
+            let alternate = self.parse_assignment()?;
+            Ok(Expr::Conditional { test: Box::new(test), consequent: Box::new(consequent), alternate: Box::new(alternate) })
+        } else {
+            Ok(test)
+        }
+    }
+
+    fn parse_logical_or(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_logical_and()?;
+        while *self.peek() == Token::Op(Op::OrOr) {
+            self.advance();
+            let right = self.parse_logical_and()?;
+            left = Expr::Logical { op: LogicalOp::Or, left: Box::new(left), right: Box::new(right) };
+        }
+        Ok(left)
+    }
+
+    fn parse_logical_and(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_equality()?;
+        while *self.peek() == Token::Op(Op::AndAnd) {
+            self.advance();
+            let right = self.parse_equality()?;
+            left = Expr::Logical { op: LogicalOp::And, left: Box::new(left), right: Box::new(right) };
+        }
+        Ok(left)
+    }
+
+    fn parse_equality(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_relational()?;
+        loop {
+            let op = match self.peek() {
+                Token::Op(Op::Eq) => Some(BinaryOp::Eq),
+                Token::Op(Op::StrictEq) => Some(BinaryOp::StrictEq),
+                Token::Op(Op::NotEq) => Some(BinaryOp::NotEq),
+                Token::Op(Op::StrictNotEq) => Some(BinaryOp::StrictNotEq),
+                _ => None,
+            };
+            match op {
+                Some(op) => {
+                    self.advance();
+                    let right = self.parse_relational()?;
+                    left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
+                }
+                None => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_relational(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_additive()?;
+        loop {
+            let op = match self.peek() {
+                Token::Op(Op::Lt) => Some(BinaryOp::Lt),
+                Token::Op(Op::Gt) => Some(BinaryOp::Gt),
+                Token::Op(Op::LtEq) => Some(BinaryOp::LtEq),
+                Token::Op(Op::GtEq) => Some(BinaryOp::GtEq),
+                _ => None,
+            };
+            match op {
+                Some(op) => {
+                    self.advance();
+                    let right = self.parse_additive()?;
+                    left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
+                }
+                None => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_additive(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_multiplicative()?;
+        loop {
+            let op = match self.peek() {
+                Token::Op(Op::Plus) => Some(BinaryOp::Add),
+                Token::Op(Op::Minus) => Some(BinaryOp::Sub),
+                _ => None,
+            };
+            match op {
+                Some(op) => {
+                    self.advance();
+                    let right = self.parse_multiplicative()?;
+                    left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
+                }
+                None => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_multiplicative(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_unary()?;
+        loop {
+            let op = match self.peek() {
+                Token::Op(Op::Star) => Some(BinaryOp::Mul),
+                Token::Op(Op::Slash) => Some(BinaryOp::Div),
+                Token::Op(Op::Percent) => Some(BinaryOp::Mod),
+                _ => None,
+            };
+            match op {
+                Some(op) => {
+                    self.advance();
+                    let right = self.parse_unary()?;
+                    left = Expr::Binary { op, left: Box::new(left), right: Box::new(right) };
+                }
+                None => break,
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        let op = match self.peek() {
+            Token::Op(Op::Not) => Some(UnaryOp::Not),
+            Token::Op(Op::Minus) => Some(UnaryOp::Neg),
+            Token::Keyword(Keyword::Typeof) => Some(UnaryOp::Typeof),
+            _ => None,
+        };
+        match op {
+            Some(op) => {
+                self.advance();
+                let argument = self.parse_unary()?;
+                Ok(Expr::Unary { op, argument: Box::new(argument) })
+            }
+            None => self.parse_call_member(),
+        }
     }
 
     fn parse_call_member(&mut self) -> Result<Expr, ParseError> {
@@ -431,6 +586,131 @@ mod tests {
                 callee: Box::new(Expr::Identifier("Foo".to_string())),
                 arguments: vec![],
             })]
+        );
+    }
+
+    #[test]
+    fn parses_unary_not_neg_and_typeof() {
+        assert_eq!(
+            parse("!a;").unwrap().body,
+            vec![Stmt::Expression(Expr::Unary { op: UnaryOp::Not, argument: Box::new(Expr::Identifier("a".to_string())) })]
+        );
+        assert_eq!(
+            parse("-a;").unwrap().body,
+            vec![Stmt::Expression(Expr::Unary { op: UnaryOp::Neg, argument: Box::new(Expr::Identifier("a".to_string())) })]
+        );
+        assert_eq!(
+            parse("typeof a;").unwrap().body,
+            vec![Stmt::Expression(Expr::Unary { op: UnaryOp::Typeof, argument: Box::new(Expr::Identifier("a".to_string())) })]
+        );
+    }
+
+    #[test]
+    fn multiplication_binds_tighter_than_addition() {
+        let program = parse("1 + 2 * 3;").unwrap();
+        assert_eq!(
+            program.body,
+            vec![Stmt::Expression(Expr::Binary {
+                op: BinaryOp::Add,
+                left: Box::new(Expr::Number(1.0)),
+                right: Box::new(Expr::Binary {
+                    op: BinaryOp::Mul,
+                    left: Box::new(Expr::Number(2.0)),
+                    right: Box::new(Expr::Number(3.0)),
+                }),
+            })]
+        );
+    }
+
+    #[test]
+    fn parses_all_equality_and_relational_operators() {
+        let cases = [
+            ("a == b;", BinaryOp::Eq), ("a === b;", BinaryOp::StrictEq),
+            ("a != b;", BinaryOp::NotEq), ("a !== b;", BinaryOp::StrictNotEq),
+            ("a < b;", BinaryOp::Lt), ("a > b;", BinaryOp::Gt),
+            ("a <= b;", BinaryOp::LtEq), ("a >= b;", BinaryOp::GtEq),
+        ];
+        for (src, op) in cases {
+            assert_eq!(
+                parse(src).unwrap().body,
+                vec![Stmt::Expression(Expr::Binary {
+                    op,
+                    left: Box::new(Expr::Identifier("a".to_string())),
+                    right: Box::new(Expr::Identifier("b".to_string())),
+                })],
+                "case {src}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_logical_and_and_or() {
+        assert_eq!(
+            parse("a && b;").unwrap().body,
+            vec![Stmt::Expression(Expr::Logical {
+                op: LogicalOp::And,
+                left: Box::new(Expr::Identifier("a".to_string())),
+                right: Box::new(Expr::Identifier("b".to_string())),
+            })]
+        );
+        assert_eq!(
+            parse("a || b;").unwrap().body,
+            vec![Stmt::Expression(Expr::Logical {
+                op: LogicalOp::Or,
+                left: Box::new(Expr::Identifier("a".to_string())),
+                right: Box::new(Expr::Identifier("b".to_string())),
+            })]
+        );
+    }
+
+    #[test]
+    fn parses_a_ternary_conditional() {
+        let program = parse("a ? b : c;").unwrap();
+        assert_eq!(
+            program.body,
+            vec![Stmt::Expression(Expr::Conditional {
+                test: Box::new(Expr::Identifier("a".to_string())),
+                consequent: Box::new(Expr::Identifier("b".to_string())),
+                alternate: Box::new(Expr::Identifier("c".to_string())),
+            })]
+        );
+    }
+
+    #[test]
+    fn parses_simple_and_compound_assignment() {
+        assert_eq!(
+            parse("a = 1;").unwrap().body,
+            vec![Stmt::Expression(Expr::Assignment {
+                op: AssignOp::Assign,
+                target: Box::new(Expr::Identifier("a".to_string())),
+                value: Box::new(Expr::Number(1.0)),
+            })]
+        );
+        assert_eq!(
+            parse("a += 1;").unwrap().body,
+            vec![Stmt::Expression(Expr::Assignment {
+                op: AssignOp::AddAssign,
+                target: Box::new(Expr::Identifier("a".to_string())),
+                value: Box::new(Expr::Number(1.0)),
+            })]
+        );
+    }
+
+    #[test]
+    fn assignment_is_right_associative() {
+        let program = parse("a = b = 3;").unwrap();
+        assert_eq!(
+            program.body,
+            vec![Stmt::Expression(Expr::Assignment {
+                op: AssignOp::Assign,
+                target: Box::new(Expr::Identifier("a".to_string())),
+                value: Box::new(Expr::Assignment {
+                    op: AssignOp::Assign,
+                    target: Box::new(Expr::Identifier("b".to_string())),
+                    value: Box::new(Expr::Number(3.0)),
+                }),
+            })],
+            "a = b = 3 must parse as a = (b = 3), not (a = b) = 3"
         );
     }
 }
