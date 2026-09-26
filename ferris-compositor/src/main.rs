@@ -132,11 +132,11 @@ impl App {
     /// ou atualiza o histórico só depois de confirmar sucesso aqui).
     fn navigate_interactive(&mut self, source: ferris_loader::Source) -> bool {
         match ferris_loader::load_page(&source) {
-            Ok((root, stylesheet)) => {
+            Ok((root, stylesheet, images)) => {
                 let bar_height = self.active_tab().map(|t| t.chrome.bar_height).unwrap_or(0.0);
                 if let Some(gpu) = &self.gpu {
                     let height = gpu.logical_height() - bar_height - self.tab_strip.height;
-                    let frame = build_page_frame(&root, &stylesheet, gpu.logical_width(), height);
+                    let frame = build_page_frame(&root, &stylesheet, &images, gpu.logical_width(), height);
                     if let Some(tab) = self.active_tab_mut() {
                         tab.page_frame = Some(frame);
                     }
@@ -301,9 +301,9 @@ fn tab_title(source: &ferris_loader::Source) -> String {
     }
 }
 
-fn build_page_frame(root: &ferris_dom::dom::Element, stylesheet: &ferris_css::stylesheet::Stylesheet, viewport_width: f32, viewport_height: f32) -> scene::Frame {
+fn build_page_frame(root: &ferris_dom::dom::Element, stylesheet: &ferris_css::stylesheet::Stylesheet, images: &ferris_scene::ImageMap, viewport_width: f32, viewport_height: f32) -> scene::Frame {
     let styled = resolve_styles(root, stylesheet);
-    match layout::layout(&styled, viewport_width, viewport_height) {
+    match layout::layout_with_images(&styled, viewport_width, viewport_height, images) {
         Some(layout_box) => paint(&layout_box),
         None => {
             log::warn!("page root has no visible layout (display:none); showing an empty frame");
@@ -327,10 +327,10 @@ impl ApplicationHandler for App {
         match Renderer::new(window.clone(), scale_factor, uncapped) {
             Some(gpu) => {
                 match ferris_loader::load_page(&self.initial_source) {
-                    Ok((root, stylesheet)) => {
+                    Ok((root, stylesheet, images)) => {
                         let chrome = Chrome::new(self.initial_source.clone(), chrome::source_display_text(&self.initial_source));
                         let height = gpu.logical_height() - chrome.bar_height - self.tab_strip.height;
-                        let page_frame = Some(build_page_frame(&root, &stylesheet, gpu.logical_width(), height));
+                        let page_frame = Some(build_page_frame(&root, &stylesheet, &images, gpu.logical_width(), height));
                         self.tabs.push(Tab { chrome, page_frame });
                         self.active_tab = 0;
                     }
@@ -527,7 +527,7 @@ mod tests {
         let css_tokens = ferris_css::tokenizer::Tokenizer::tokenize("html { display: none; }");
         let stylesheet = ferris_css::parser::Parser::parse(&css_tokens);
 
-        let frame = build_page_frame(&root, &stylesheet, 800.0, 600.0);
+        let frame = build_page_frame(&root, &stylesheet, &ferris_scene::ImageMap::new(), 800.0, 600.0);
 
         assert!(frame.commands.is_empty());
     }
