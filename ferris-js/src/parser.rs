@@ -78,7 +78,82 @@ impl<'a> ParserState<'a> {
     }
 
     fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_primary()
+        self.parse_call_member()
+    }
+
+    fn parse_call_member(&mut self) -> Result<Expr, ParseError> {
+        let mut expr = self.parse_primary()?;
+        loop {
+            match self.peek().clone() {
+                Token::Punct(Punct::Dot) => {
+                    self.advance();
+                    let name = self.expect_identifier()?;
+                    expr = Expr::Member {
+                        object: Box::new(expr),
+                        property: Box::new(Expr::Identifier(name)),
+                        computed: false,
+                    };
+                }
+                Token::Punct(Punct::LBracket) => {
+                    self.advance();
+                    let property = self.parse_expression()?;
+                    self.expect_punct(Punct::RBracket)?;
+                    expr = Expr::Member { object: Box::new(expr), property: Box::new(property), computed: true };
+                }
+                Token::Punct(Punct::LParen) => {
+                    let arguments = self.parse_arguments()?;
+                    expr = Expr::Call { callee: Box::new(expr), arguments };
+                }
+                _ => break,
+            }
+        }
+        Ok(expr)
+    }
+
+    fn parse_arguments(&mut self) -> Result<Vec<Expr>, ParseError> {
+        self.expect_punct(Punct::LParen)?;
+        let mut arguments = Vec::new();
+        while *self.peek() != Token::Punct(Punct::RParen) && *self.peek() != Token::Eof {
+            arguments.push(self.parse_expression()?);
+            if *self.peek() == Token::Punct(Punct::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.expect_punct(Punct::RParen)?;
+        Ok(arguments)
+    }
+
+    fn parse_new(&mut self) -> Result<Expr, ParseError> {
+        self.advance(); // 'new'
+        let mut callee = self.parse_primary()?;
+        loop {
+            match self.peek().clone() {
+                Token::Punct(Punct::Dot) => {
+                    self.advance();
+                    let name = self.expect_identifier()?;
+                    callee = Expr::Member {
+                        object: Box::new(callee),
+                        property: Box::new(Expr::Identifier(name)),
+                        computed: false,
+                    };
+                }
+                Token::Punct(Punct::LBracket) => {
+                    self.advance();
+                    let property = self.parse_expression()?;
+                    self.expect_punct(Punct::RBracket)?;
+                    callee = Expr::Member { object: Box::new(callee), property: Box::new(property), computed: true };
+                }
+                _ => break,
+            }
+        }
+        let arguments = if *self.peek() == Token::Punct(Punct::LParen) {
+            self.parse_arguments()?
+        } else {
+            Vec::new()
+        };
+        Ok(Expr::New { callee: Box::new(callee), arguments })
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
@@ -115,6 +190,7 @@ impl<'a> ParserState<'a> {
                 self.advance();
                 Ok(Expr::Identifier("this".to_string()))
             }
+            Token::Keyword(Keyword::New) => self.parse_new(),
             Token::Punct(Punct::LParen) => {
                 self.advance();
                 let expr = self.parse_expression()?;
@@ -270,5 +346,91 @@ mod tests {
     fn unterminated_object_literal_is_a_parse_error_not_a_panic() {
         let result = parse("({a: 1");
         assert!(result.is_err(), "missing '}}' before EOF must be a parse error");
+    }
+
+    #[test]
+    fn parses_dot_member_access() {
+        let program = parse("a.b;").unwrap();
+        assert_eq!(
+            program.body,
+            vec![Stmt::Expression(Expr::Member {
+                object: Box::new(Expr::Identifier("a".to_string())),
+                property: Box::new(Expr::Identifier("b".to_string())),
+                computed: false,
+            })]
+        );
+    }
+
+    #[test]
+    fn parses_computed_bracket_member_access() {
+        let program = parse("a[0];").unwrap();
+        assert_eq!(
+            program.body,
+            vec![Stmt::Expression(Expr::Member {
+                object: Box::new(Expr::Identifier("a".to_string())),
+                property: Box::new(Expr::Number(0.0)),
+                computed: true,
+            })]
+        );
+    }
+
+    #[test]
+    fn parses_a_function_call_with_arguments() {
+        let program = parse("f(1, 2);").unwrap();
+        assert_eq!(
+            program.body,
+            vec![Stmt::Expression(Expr::Call {
+                callee: Box::new(Expr::Identifier("f".to_string())),
+                arguments: vec![Expr::Number(1.0), Expr::Number(2.0)],
+            })]
+        );
+    }
+
+    #[test]
+    fn parses_chained_member_and_call() {
+        let program = parse("a.b().c;").unwrap();
+        assert_eq!(
+            program.body,
+            vec![Stmt::Expression(Expr::Member {
+                object: Box::new(Expr::Call {
+                    callee: Box::new(Expr::Member {
+                        object: Box::new(Expr::Identifier("a".to_string())),
+                        property: Box::new(Expr::Identifier("b".to_string())),
+                        computed: false,
+                    }),
+                    arguments: vec![],
+                }),
+                property: Box::new(Expr::Identifier("c".to_string())),
+                computed: false,
+            })]
+        );
+    }
+
+    #[test]
+    fn parses_new_with_member_callee_and_arguments() {
+        let program = parse("new Foo.Bar(1);").unwrap();
+        assert_eq!(
+            program.body,
+            vec![Stmt::Expression(Expr::New {
+                callee: Box::new(Expr::Member {
+                    object: Box::new(Expr::Identifier("Foo".to_string())),
+                    property: Box::new(Expr::Identifier("Bar".to_string())),
+                    computed: false,
+                }),
+                arguments: vec![Expr::Number(1.0)],
+            })]
+        );
+    }
+
+    #[test]
+    fn parses_new_with_no_parentheses_as_zero_arguments() {
+        let program = parse("new Foo;").unwrap();
+        assert_eq!(
+            program.body,
+            vec![Stmt::Expression(Expr::New {
+                callee: Box::new(Expr::Identifier("Foo".to_string())),
+                arguments: vec![],
+            })]
+        );
     }
 }
