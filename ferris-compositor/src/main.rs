@@ -1,4 +1,4 @@
-use ferris_compositor::{chrome, perf, renderer, scene};
+use ferris_compositor::{chrome, perf, renderer, scene, tabs};
 
 use std::sync::Arc;
 
@@ -14,7 +14,13 @@ use ferris_layout::layout;
 use ferris_paint::paint::paint;
 use ferris_style::resolve_styles;
 
-use chrome::{Chrome, ChromeAction};
+use chrome::{Chrome, ChromeAction, NavigationHistory};
+use tabs::{TabAction, TabStrip};
+
+struct Tab {
+    chrome: Chrome,
+    page_frame: Option<scene::Frame>,
+}
 
 struct App {
     window: Option<Arc<Window>>,
@@ -22,9 +28,10 @@ struct App {
     frame_timer: perf::FrameTimer,
     last_frame_start: Option<std::time::Instant>,
     occluded: bool,
-    page_frame: Option<scene::Frame>,
     initial_source: ferris_loader::Source,
-    chrome: Option<Chrome>,
+    tabs: Vec<Tab>,
+    active_tab: usize,
+    tab_strip: TabStrip,
     modifiers: ModifiersState,
     cursor_position: (f32, f32),
 }
@@ -37,87 +44,148 @@ impl App {
             frame_timer: perf::FrameTimer::new(120),
             last_frame_start: None,
             occluded: false,
-            page_frame: None,
             initial_source,
-            chrome: None,
+            tabs: Vec::new(),
+            active_tab: 0,
+            tab_strip: TabStrip::new(),
             modifiers: ModifiersState::empty(),
             cursor_position: (0.0, 0.0),
         }
     }
 
-    fn go_back(&mut self) {
-        let Some(chrome) = self.chrome.as_mut() else { return };
-        if let Some(source) = chrome.history.as_mut().unwrap().back().cloned() {
-            self.navigate_interactive(source);
+    fn active_tab(&self) -> Option<&Tab> {
+        self.tabs.get(self.active_tab)
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.active_tab)
+    }
+
+    fn new_tab(&mut self) {
+        self.tabs.push(Tab { chrome: Chrome::new_blank(), page_frame: None });
+        self.active_tab = self.tabs.len() - 1;
+    }
+
+    fn switch_tab(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.active_tab = index;
         }
+    }
+
+    fn next_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        }
+    }
+
+    /// Remove a aba em `index`, ajustando `active_tab` pra continuar
+    /// apontando pra uma aba válida. Não decide sozinho se a janela deve
+    /// fechar quando fica sem nenhuma aba — quem chama confere
+    /// `self.tabs.is_empty()` depois (ver `close_tab_and_maybe_exit`).
+    fn close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            return;
+        }
+        if index < self.active_tab {
+            self.active_tab -= 1;
+        } else if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+    }
+
+    fn close_tab_and_maybe_exit(&mut self, index: usize, event_loop: &ActiveEventLoop) {
+        self.close_tab(index);
+        if self.tabs.is_empty() {
+            event_loop.exit();
+        }
+    }
+
+    fn go_back(&mut self) {
+        let Some(tab) = self.active_tab_mut() else { return };
+        let Some(history) = tab.chrome.history.as_mut() else { return };
+        let Some(source) = history.back().cloned() else { return };
+        self.navigate_interactive(source);
     }
 
     fn go_forward(&mut self) {
-        let Some(chrome) = self.chrome.as_mut() else { return };
-        if let Some(source) = chrome.history.as_mut().unwrap().forward().cloned() {
-            self.navigate_interactive(source);
-        }
+        let Some(tab) = self.active_tab_mut() else { return };
+        let Some(history) = tab.chrome.history.as_mut() else { return };
+        let Some(source) = history.forward().cloned() else { return };
+        self.navigate_interactive(source);
     }
 
     fn reload(&mut self) {
-        let Some(chrome) = self.chrome.as_ref() else { return };
-        let source = chrome.history.as_ref().unwrap().current().clone();
+        let Some(tab) = self.active_tab() else { return };
+        let Some(source) = tab.chrome.history.as_ref().map(|h| h.current().clone()) else { return };
         self.navigate_interactive(source);
     }
 
     /// Navega de forma interativa (fora do carregamento inicial): nunca
     /// mata o processo em caso de falha, só mostra o erro na barra de
-    /// endereço. Não mexe no histórico — quem chama decide isso antes
-    /// (Voltar/Avançar já moveram o índice; Recarregar não move nada;
-    /// uma URL nova digitada já chamou `history.go` antes de chegar aqui).
+    /// endereço da aba ativa. Não mexe no histórico — quem chama decide
+    /// isso antes (Voltar/Avançar já moveram o índice; Recarregar não
+    /// move nada; uma URL nova digitada, em `commit_address_bar`, cria
+    /// ou atualiza o histórico só depois de confirmar sucesso aqui).
     fn navigate_interactive(&mut self, source: ferris_loader::Source) -> bool {
         match ferris_loader::load_page(&source) {
             Ok((root, stylesheet)) => {
-                if let (Some(gpu), Some(chrome)) = (&self.gpu, &self.chrome) {
-                    let height = gpu.logical_height() - chrome.bar_height;
-                    self.page_frame = Some(build_page_frame(&root, &stylesheet, gpu.logical_width(), height));
+                let bar_height = self.active_tab().map(|t| t.chrome.bar_height).unwrap_or(0.0);
+                if let Some(gpu) = &self.gpu {
+                    let height = gpu.logical_height() - bar_height - self.tab_strip.height;
+                    let frame = build_page_frame(&root, &stylesheet, gpu.logical_width(), height);
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.page_frame = Some(frame);
+                    }
                 }
-                if let Some(chrome) = self.chrome.as_mut() {
+                if let Some(tab) = self.active_tab_mut() {
                     let text = chrome::source_display_text(&source);
-                    chrome.address_bar.set_text(&text);
+                    tab.chrome.address_bar.set_text(&text);
                 }
                 true
             }
             Err(ferris_loader::LoadError::Fetch(msg)) => {
                 log::warn!("navigation failed: {msg}");
-                if let Some(chrome) = self.chrome.as_mut() {
-                    chrome.address_bar.set_error(Some(msg));
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.chrome.address_bar.set_error(Some(msg));
                 }
                 false
             }
         }
     }
 
-    /// Confirma o texto digitado na barra de endereço (Enter). Só grava a
-    /// nova URL/caminho no histórico quando a navegação de fato tem
-    /// sucesso — uma navegação digitada que falha não deve deixar
-    /// entrada morta no histórico (ver doc-comment de `navigate_interactive`).
+    /// Confirma o texto digitado na barra de endereço (Enter). Só grava
+    /// a nova URL/caminho no histórico quando a navegação de fato tem
+    /// sucesso. Se a aba ainda não tinha histórico nenhum (aba em
+    /// branco), a primeira navegação bem-sucedida CRIA o histórico em
+    /// vez de tentar chamar `.go()` num histórico inexistente.
     fn commit_address_bar(&mut self) {
-        let committed = self.chrome.as_mut().and_then(|c| c.address_bar.commit());
+        let committed = self.active_tab_mut().and_then(|t| t.chrome.address_bar.commit());
         if let Some(source) = committed {
             if self.navigate_interactive(source.clone()) {
-                if let Some(chrome) = self.chrome.as_mut() {
-                    chrome.history.as_mut().unwrap().go(source);
+                if let Some(tab) = self.active_tab_mut() {
+                    match tab.chrome.history.as_mut() {
+                        Some(history) => history.go(source),
+                        None => tab.chrome.history = Some(NavigationHistory::new(source)),
+                    }
                 }
             }
         }
     }
 
-    fn handle_keyboard_input(&mut self, event: &winit::event::KeyEvent) {
+    fn handle_keyboard_input(&mut self, event_loop: &ActiveEventLoop, event: &winit::event::KeyEvent) {
         if event.state != ElementState::Pressed {
             return;
         }
-        let focused = self.chrome.as_ref().map(|c| c.address_bar.is_focused()).unwrap_or(false);
+        let focused = self.active_tab().map(|t| t.chrome.address_bar.is_focused()).unwrap_or(false);
         for intent in classify_key(&event.logical_key, self.modifiers, focused) {
             match intent {
                 KeyIntent::FocusAddressBar => {
-                    if let Some(chrome) = self.chrome.as_mut() {
-                        chrome.address_bar.set_focused(true);
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.chrome.address_bar.set_focused(true);
                     }
                 }
                 KeyIntent::Back => self.go_back(),
@@ -125,21 +193,27 @@ impl App {
                 KeyIntent::Reload => self.reload(),
                 KeyIntent::Commit => self.commit_address_bar(),
                 KeyIntent::Backspace => {
-                    if let Some(chrome) = self.chrome.as_mut() {
-                        chrome.address_bar.on_backspace();
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.chrome.address_bar.on_backspace();
                     }
                 }
                 KeyIntent::Cancel => {
-                    if let Some(chrome) = self.chrome.as_mut() {
-                        let text = chrome::source_display_text(chrome.history.as_ref().unwrap().current());
-                        chrome.address_bar.cancel(&text);
+                    if let Some(tab) = self.active_tab_mut() {
+                        let text = tab.chrome.history.as_ref().map(|h| chrome::source_display_text(h.current())).unwrap_or_default();
+                        tab.chrome.address_bar.cancel(&text);
                     }
                 }
                 KeyIntent::Type(c) => {
-                    if let Some(chrome) = self.chrome.as_mut() {
-                        chrome.address_bar.on_char(c);
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.chrome.address_bar.on_char(c);
                     }
                 }
+                KeyIntent::NewTab => self.new_tab(),
+                KeyIntent::CloseTab => {
+                    let index = self.active_tab;
+                    self.close_tab_and_maybe_exit(index, event_loop);
+                }
+                KeyIntent::NextTab => self.next_tab(),
                 KeyIntent::Ignore => {}
             }
         }
@@ -160,6 +234,9 @@ enum KeyIntent {
     Backspace,
     Cancel,
     Type(char),
+    NewTab,
+    CloseTab,
+    NextTab,
     Ignore,
 }
 
@@ -169,6 +246,15 @@ fn classify_key(logical_key: &Key, modifiers: ModifiersState, address_bar_focuse
             if s.as_str().eq_ignore_ascii_case("l") {
                 return vec![KeyIntent::FocusAddressBar];
             }
+            if s.as_str().eq_ignore_ascii_case("t") {
+                return vec![KeyIntent::NewTab];
+            }
+            if s.as_str().eq_ignore_ascii_case("w") {
+                return vec![KeyIntent::CloseTab];
+            }
+        }
+        if *logical_key == Key::Named(NamedKey::Tab) {
+            return vec![KeyIntent::NextTab];
         }
         return vec![KeyIntent::Ignore];
     }
@@ -225,9 +311,10 @@ impl ApplicationHandler for App {
                 match ferris_loader::load_page(&self.initial_source) {
                     Ok((root, stylesheet)) => {
                         let chrome = Chrome::new(self.initial_source.clone(), chrome::source_display_text(&self.initial_source));
-                        let height = gpu.logical_height() - chrome.bar_height;
-                        self.page_frame = Some(build_page_frame(&root, &stylesheet, gpu.logical_width(), height));
-                        self.chrome = Some(chrome);
+                        let height = gpu.logical_height() - chrome.bar_height - self.tab_strip.height;
+                        let page_frame = Some(build_page_frame(&root, &stylesheet, gpu.logical_width(), height));
+                        self.tabs.push(Tab { chrome, page_frame });
+                        self.active_tab = 0;
                     }
                     Err(ferris_loader::LoadError::Fetch(msg)) => {
                         log::error!("failed to load initial page: {msg}");
@@ -276,9 +363,21 @@ impl ApplicationHandler for App {
                     return;
                 }
                 let (x, y) = self.cursor_position;
-                let action = self.chrome.as_ref().and_then(|c| c.hit_test(x, y));
-                if let Some(chrome) = self.chrome.as_mut() {
-                    chrome.address_bar.set_focused(matches!(action, Some(ChromeAction::FocusAddressBar)));
+
+                let tab_count = self.tabs.len();
+                if let Some(action) = self.tab_strip.hit_test(tab_count, x, y) {
+                    match action {
+                        TabAction::Select(i) => self.switch_tab(i),
+                        TabAction::Close(i) => self.close_tab_and_maybe_exit(i, event_loop),
+                        TabAction::New => self.new_tab(),
+                    }
+                    return;
+                }
+
+                let chrome_y = y - self.tab_strip.height;
+                let action = self.active_tab().and_then(|t| t.chrome.hit_test(x, chrome_y));
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.chrome.address_bar.set_focused(matches!(action, Some(ChromeAction::FocusAddressBar)));
                 }
                 match action {
                     Some(ChromeAction::Back) => self.go_back(),
@@ -291,7 +390,7 @@ impl ApplicationHandler for App {
                 if self.gpu.is_none() {
                     return;
                 }
-                self.handle_keyboard_input(&event);
+                self.handle_keyboard_input(event_loop, &event);
             }
             WindowEvent::RedrawRequested => {
                 let Some(gpu) = self.gpu.as_mut() else { return };
@@ -307,16 +406,30 @@ impl ApplicationHandler for App {
                 }
                 self.last_frame_start = Some(now);
 
-                let page = self.page_frame.clone().unwrap_or_default();
-                let mut frame = match &self.chrome {
-                    Some(chrome) => {
-                        let mut f = chrome::translate_frame(&page, chrome.bar_height);
-                        f.commands.extend(chrome.frame(gpu.logical_width()).commands);
-                        f
-                    }
-                    None => page,
-                };
+                let window_width = gpu.logical_width();
+                let titles: Vec<String> = self
+                    .tabs
+                    .iter()
+                    .map(|t| match t.chrome.history.as_ref() {
+                        Some(history) => chrome::source_display_text(history.current()),
+                        None => "Nova aba".to_string(),
+                    })
+                    .collect();
 
+                let mut frame = self.tab_strip.frame(&titles, self.active_tab, window_width);
+                let mut bar_height = 0.0;
+
+                if let Some(tab) = self.tabs.get(self.active_tab) {
+                    bar_height = tab.chrome.bar_height;
+                    let bar_frame = tab.chrome.frame(window_width);
+                    frame.commands.extend(chrome::translate_frame(&bar_frame, self.tab_strip.height).commands);
+
+                    let page = tab.page_frame.clone().unwrap_or_default();
+                    let page_dy = self.tab_strip.height + bar_height;
+                    frame.commands.extend(chrome::translate_frame(&page, page_dy).commands);
+                }
+
+                let overlay_y = self.tab_strip.height + bar_height + 6.0;
                 let overlay = format!(
                     "{:.1} fps | {:.2} ms/frame | budget {}",
                     self.frame_timer.fps(),
@@ -324,7 +437,7 @@ impl ApplicationHandler for App {
                     if self.frame_timer.meets_budget(perf::BUDGET_120FPS) { "OK" } else { "MISSED" },
                 );
                 frame.push(scene::DrawCommand::Text(scene::TextCommand {
-                    x: 20.0, y: 50.0, content: overlay, size: 18.0, color: [1.0, 0.9, 0.3, 1.0],
+                    x: 20.0, y: overlay_y, content: overlay, size: 18.0, color: [1.0, 0.9, 0.3, 1.0],
                 }));
 
                 match gpu.render_frame(&frame) {
@@ -374,6 +487,19 @@ mod tests {
     use super::*;
     use winit::keyboard::SmolStr;
 
+    fn file(name: &str) -> ferris_loader::Source {
+        ferris_loader::Source::File(std::path::PathBuf::from(name))
+    }
+
+    fn app_with_tabs(sources: &[&str]) -> App {
+        let mut app = App::new(file(sources[0]));
+        for s in sources {
+            let chrome = Chrome::new(file(s), (*s).to_string());
+            app.tabs.push(Tab { chrome, page_frame: None });
+        }
+        app
+    }
+
     // --- Review Focus: display:none page root must not panic ---
     #[test]
     fn build_page_frame_on_display_none_root_returns_empty_frame_without_panicking() {
@@ -389,36 +515,109 @@ mod tests {
     // --- Review Focus: interactive navigation failure never exits the process ---
     #[test]
     fn navigate_interactive_on_failure_sets_the_address_bar_error_without_touching_the_page_frame() {
-        let mut app = App::new(ferris_loader::Source::File(std::path::PathBuf::from("does-not-exist.html")));
-        app.chrome = Some(Chrome::new(app.initial_source.clone(), "does-not-exist.html".to_string()));
-        let previous_frame = app.page_frame.clone();
+        let mut app = app_with_tabs(&["does-not-exist.html"]);
+        let previous_frame = app.tabs[0].page_frame.clone();
 
-        app.navigate_interactive(ferris_loader::Source::File(std::path::PathBuf::from("still-does-not-exist.html")));
+        app.navigate_interactive(file("still-does-not-exist.html"));
 
-        assert_eq!(app.page_frame, previous_frame, "a failed navigation must not touch the cached page frame");
-        let error = app.chrome.as_ref().unwrap().address_bar.error().map(str::to_string);
+        assert_eq!(app.tabs[0].page_frame, previous_frame, "a failed navigation must not touch the cached page frame");
+        let error = app.tabs[0].chrome.address_bar.error().map(str::to_string);
         assert!(error.is_some(), "a failed navigation must set a visible error on the address bar");
     }
 
     // --- Review Focus: a failed typed navigation must not pollute history ---
     #[test]
     fn commit_address_bar_on_failed_navigation_does_not_add_to_history() {
-        let mut app = App::new(ferris_loader::Source::File(std::path::PathBuf::from("does-not-exist.html")));
-        app.chrome = Some(Chrome::new(app.initial_source.clone(), "does-not-exist.html".to_string()));
+        let mut app = app_with_tabs(&["does-not-exist.html"]);
 
-        app.chrome.as_mut().unwrap().address_bar.set_focused(true);
+        app.tabs[0].chrome.address_bar.set_focused(true);
         for c in "still-does-not-exist.html".chars() {
-            app.chrome.as_mut().unwrap().address_bar.on_char(c);
+            app.tabs[0].chrome.address_bar.on_char(c);
         }
         app.commit_address_bar();
 
         assert!(
-            !app.chrome.as_ref().unwrap().history.as_ref().unwrap().can_go_back(),
+            !app.tabs[0].chrome.history.as_ref().unwrap().can_go_back(),
             "a failed typed navigation must not be added to history"
         );
     }
 
-    // --- Review Focus: shortcuts work regardless of focus; Ctrl+L never leaks "l" ---
+    // --- Review Focus: navigating from a blank tab must create its history, not panic ---
+    #[test]
+    fn commit_address_bar_on_a_blank_tab_creates_history_on_first_successful_navigation() {
+        let dir = std::env::temp_dir().join("ferris_compositor_tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tab_blank_nav_test.html");
+        std::fs::write(&path, "<p>hi</p>").unwrap();
+
+        let mut app = App::new(ferris_loader::Source::File(path.clone()));
+        app.tabs.push(Tab { chrome: Chrome::new_blank(), page_frame: None });
+
+        for c in path.to_str().unwrap().chars() {
+            app.tabs[0].chrome.address_bar.on_char(c);
+        }
+        app.commit_address_bar();
+
+        assert!(app.tabs[0].chrome.history.is_some(), "the first successful navigation from a blank tab must create its history");
+        assert_eq!(app.tabs[0].chrome.history.as_ref().unwrap().current(), &ferris_loader::Source::File(path));
+    }
+
+    // --- Review Focus: closing a tab must leave a valid tab active ---
+    #[test]
+    fn close_tab_keeps_the_next_tab_active_when_closing_the_active_tab_in_the_middle() {
+        let mut app = app_with_tabs(&["a.html", "b.html", "c.html"]);
+        app.active_tab = 1;
+        app.close_tab(1);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1, "closing the middle active tab should select what is now at the same index (formerly c.html)");
+        assert_eq!(app.tabs[app.active_tab].chrome.history.as_ref().unwrap().current(), &file("c.html"));
+    }
+
+    #[test]
+    fn close_tab_before_the_active_one_shifts_active_tab_left() {
+        let mut app = app_with_tabs(&["a.html", "b.html", "c.html"]);
+        app.active_tab = 2;
+        app.close_tab(0);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1, "the active tab's own index shifts left by one since a tab before it was removed");
+        assert_eq!(app.tabs[app.active_tab].chrome.history.as_ref().unwrap().current(), &file("c.html"));
+    }
+
+    #[test]
+    fn close_tab_clamps_active_tab_when_closing_the_last_active_tab() {
+        let mut app = app_with_tabs(&["a.html", "b.html"]);
+        app.active_tab = 1;
+        app.close_tab(1);
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active_tab, 0);
+    }
+
+    // --- Review Focus: closing the only tab must not index out of bounds ---
+    #[test]
+    fn close_tab_on_the_only_tab_leaves_the_tabs_vector_empty() {
+        let mut app = app_with_tabs(&["a.html"]);
+        app.close_tab(0);
+        assert!(app.tabs.is_empty());
+    }
+
+    #[test]
+    fn new_tab_appends_a_blank_tab_and_switches_to_it() {
+        let mut app = app_with_tabs(&["a.html"]);
+        app.new_tab();
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert!(app.tabs[1].chrome.history.is_none());
+        assert!(app.tabs[1].chrome.address_bar.is_focused());
+    }
+
+    #[test]
+    fn next_tab_wraps_around_to_the_first_tab() {
+        let mut app = app_with_tabs(&["a.html", "b.html"]);
+        app.active_tab = 1;
+        app.next_tab();
+        assert_eq!(app.active_tab, 0);
+    }
+
     #[test]
     fn classify_key_ctrl_l_focuses_the_address_bar_and_does_not_type() {
         let key = Key::Character(SmolStr::new("l"));
@@ -431,6 +630,27 @@ mod tests {
         let key = Key::Character(SmolStr::new("c"));
         let intents = classify_key(&key, ModifiersState::CONTROL, true);
         assert_eq!(intents, vec![KeyIntent::Ignore]);
+    }
+
+    // --- Review Focus: Ctrl+T/Ctrl+W/Ctrl+Tab work regardless of focus, never leak "t"/"w" ---
+    #[test]
+    fn classify_key_ctrl_t_opens_a_new_tab() {
+        let key = Key::Character(SmolStr::new("t"));
+        assert_eq!(classify_key(&key, ModifiersState::CONTROL, false), vec![KeyIntent::NewTab]);
+        assert_eq!(classify_key(&key, ModifiersState::CONTROL, true), vec![KeyIntent::NewTab], "must work even while the address bar is focused, and must not type 't'");
+    }
+
+    #[test]
+    fn classify_key_ctrl_w_closes_the_current_tab() {
+        let key = Key::Character(SmolStr::new("w"));
+        assert_eq!(classify_key(&key, ModifiersState::CONTROL, false), vec![KeyIntent::CloseTab]);
+        assert_eq!(classify_key(&key, ModifiersState::CONTROL, true), vec![KeyIntent::CloseTab], "must work even while the address bar is focused, and must not type 'w'");
+    }
+
+    #[test]
+    fn classify_key_ctrl_tab_switches_to_the_next_tab() {
+        let key = Key::Named(NamedKey::Tab);
+        assert_eq!(classify_key(&key, ModifiersState::CONTROL, false), vec![KeyIntent::NextTab]);
     }
 
     #[test]
