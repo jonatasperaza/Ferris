@@ -49,9 +49,40 @@ impl TextCommand {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct DecodedImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: std::sync::Arc<[u8]>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageCommand {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub image: DecodedImage,
+}
+
+impl ImageCommand {
+    pub fn scaled(&self, factor: f32) -> ImageCommand {
+        ImageCommand {
+            x: self.x * factor,
+            y: self.y * factor,
+            width: self.width * factor,
+            height: self.height * factor,
+            image: self.image.clone(),
+        }
+    }
+}
+
+pub type ImageMap = std::collections::HashMap<String, DecodedImage>;
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum DrawCommand {
     Rect(RectCommand),
     Text(TextCommand),
+    Image(ImageCommand),
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -100,5 +131,35 @@ mod tests {
         assert_eq!(scaled.size, 24.0);
         assert_eq!(scaled.content, "hi");
         assert_eq!(scaled.color, [1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn image_scaled_multiplies_position_and_size_not_pixel_dimensions() {
+        let image = DecodedImage { width: 10, height: 20, rgba: std::sync::Arc::from(vec![0u8; 10 * 20 * 4]) };
+        let cmd = ImageCommand { x: 1.0, y: 2.0, width: 3.0, height: 4.0, image: image.clone() };
+        let scaled = cmd.scaled(2.0);
+        assert_eq!(scaled.x, 2.0);
+        assert_eq!(scaled.y, 4.0);
+        assert_eq!(scaled.width, 6.0);
+        assert_eq!(scaled.height, 8.0);
+        assert_eq!(scaled.image.width, 10, "pixel dimensions are never scaled, only the on-screen box");
+        assert_eq!(scaled.image.height, 20);
+    }
+
+    #[test]
+    fn image_scaled_reuses_the_same_underlying_pixel_arc_no_copy() {
+        let image = DecodedImage { width: 1, height: 1, rgba: std::sync::Arc::from(vec![1u8, 2, 3, 4]) };
+        let cmd = ImageCommand { x: 0.0, y: 0.0, width: 1.0, height: 1.0, image: image.clone() };
+        let scaled = cmd.scaled(1.5);
+        assert!(std::sync::Arc::ptr_eq(&scaled.image.rgba, &image.rgba), "scaling must clone the Arc handle, not the pixel bytes");
+    }
+
+    #[test]
+    fn draw_command_image_variant_round_trips_through_a_frame() {
+        let image = DecodedImage { width: 1, height: 1, rgba: std::sync::Arc::from(vec![255u8, 0, 0, 255]) };
+        let mut frame = Frame::new();
+        frame.push(DrawCommand::Image(ImageCommand { x: 0.0, y: 0.0, width: 1.0, height: 1.0, image }));
+        assert_eq!(frame.commands.len(), 1);
+        assert!(matches!(frame.commands[0], DrawCommand::Image(_)));
     }
 }
