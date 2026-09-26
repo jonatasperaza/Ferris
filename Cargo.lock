@@ -676,6 +676,7 @@ version = "0.1.0"
 dependencies = [
  "ferris-css",
  "ferris-dom",
+ "ferris-scene",
  "ferris-style",
  "ferris-text",
 ]

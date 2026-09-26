@@ -24,6 +24,7 @@ pub struct LayoutBox<'a> {
     pub padding: Edges,
     pub lines: Vec<Vec<InlineRun<'a>>>,
     pub children: Vec<LayoutBox<'a>>,
+    pub image: Option<ferris_scene::DecodedImage>,
 }
 
 /// One styled, contiguous, already-positioned run of text within a single
@@ -123,14 +124,25 @@ fn resolved_length_or(len: Length, basis: f32, default_if_auto: f32) -> f32 {
 /// `ferris-css`/`ferris-style`). Callers that know their root is never
 /// hidden may `.unwrap()`; callers building a general-purpose consumer
 /// (piece 2.5) should handle `None` as "nothing to paint."
+/// Lays out `root` with no images available — every `<img>` gets a 0x0 box
+/// and `image: None`. Every existing caller/test of this function keeps
+/// working unchanged; real page rendering uses `layout_with_images` below.
 pub fn layout<'a>(root: &'a StyledNode<'a>, viewport_width: f32, viewport_height: f32) -> Option<LayoutBox<'a>> {
+    layout_with_images(root, viewport_width, viewport_height, &ferris_scene::ImageMap::new())
+}
+
+/// Lays out `root`, sizing any `<img>` element using CSS `width`/`height`
+/// when specified, or `images`' intrinsic decoded dimensions otherwise. An
+/// `<img>` with no matching entry in `images` (missing `src`, failed
+/// fetch/decode) gets a 0x0 box and `image: None` — never panics.
+pub fn layout_with_images<'a>(root: &'a StyledNode<'a>, viewport_width: f32, viewport_height: f32, images: &ferris_scene::ImageMap) -> Option<LayoutBox<'a>> {
     let containing_block = ContainingBlock {
         content_x: 0.0,
         content_y: 0.0,
         content_width: viewport_width,
         viewport_height,
     };
-    layout_block(root, containing_block, true)
+    layout_block(root, containing_block, true, images)
 }
 
 /// Walks `node`'s direct children in true DOM order (mixing `Node::Text` and
@@ -331,6 +343,7 @@ fn layout_block<'a>(
     node: &'a StyledNode<'a>,
     containing_block: ContainingBlock,
     is_root: bool,
+    images: &ferris_scene::ImageMap,
 ) -> Option<LayoutBox<'a>> {
     if node.style.get("display").map(String::as_str) == Some("none") {
         return None;
@@ -343,8 +356,19 @@ fn layout_block<'a>(
     let edges_width = margin.left + margin.right + border.left + border.right + padding.left + padding.right;
     let available_width = (containing_block.content_width - edges_width).max(0.0);
 
+    let image = if node.element.tag_name == "img" {
+        node.element.attributes.get("src").and_then(|src| images.get(src)).cloned()
+    } else {
+        None
+    };
+
     let width_len = parse_length(node.style.get("width").map(String::as_str));
-    let width = resolved_length_or(width_len, containing_block.content_width, available_width).max(0.0);
+    let width_default = if node.element.tag_name == "img" {
+        image.as_ref().map(|img| img.width as f32).unwrap_or(0.0)
+    } else {
+        available_width
+    };
+    let width = resolved_length_or(width_len, containing_block.content_width, width_default).max(0.0);
 
     let content_x = containing_block.content_x + margin.left + border.left + padding.left;
     let content_y = containing_block.content_y + margin.top + border.top + padding.top;
@@ -376,7 +400,7 @@ fn layout_block<'a>(
             content_width: width,
             viewport_height: containing_block.viewport_height,
         };
-        if let Some(child_box) = layout_block(child, child_containing_block, false) {
+        if let Some(child_box) = layout_block(child, child_containing_block, false, images) {
             let child_total_height = child_box.margin.top
                 + child_box.border.top
                 + child_box.padding.top
@@ -390,14 +414,18 @@ fn layout_block<'a>(
     }
 
     let height_len = parse_length(node.style.get("height").map(String::as_str));
-    let auto_height = (cursor_y - content_y).max(0.0);
+    let auto_height = if node.element.tag_name == "img" {
+        image.as_ref().map(|img| img.height as f32).unwrap_or(0.0)
+    } else {
+        (cursor_y - content_y).max(0.0)
+    };
     let height = match height_len {
         Length::Percent(p) if is_root => (containing_block.viewport_height * (p / 100.0)).max(0.0),
         Length::Percent(_) => auto_height,
         other => resolved_length_or(other, 0.0, auto_height).max(0.0),
     };
 
-    Some(LayoutBox { styled_node: node, x: content_x, y: content_y, width, height, margin, border, padding, lines, children })
+    Some(LayoutBox { styled_node: node, x: content_x, y: content_y, width, height, margin, border, padding, lines, children, image })
 }
 
 #[cfg(test)]
@@ -934,5 +962,74 @@ mod tests {
         assert!(joined.contains("Some trailing text"), "expected the trailing text to survive (previously silently dropped), got {joined:?}");
         assert_eq!(root.children.len(), 1, "the h1 must still be stacked as its own block child");
         assert_eq!(root.children[0].lines[0][0].text, "Title");
+    }
+
+    fn tiny_image(width: u32, height: u32) -> ferris_scene::DecodedImage {
+        ferris_scene::DecodedImage { width, height, rgba: std::sync::Arc::from(vec![0u8; (width * height * 4) as usize]) }
+    }
+
+    #[test]
+    fn img_with_no_css_size_uses_the_decoded_intrinsic_dimensions() {
+        let mut el = Element::new("img");
+        el.attributes.insert("src".to_string(), "photo.png".to_string());
+        let node = leaf_styled_node(&el, &[]);
+        let mut images = ferris_scene::ImageMap::new();
+        images.insert("photo.png".to_string(), tiny_image(120, 80));
+
+        let root = layout_with_images(&node, 800.0, 600.0, &images).unwrap();
+
+        assert_eq!(root.width, 120.0);
+        assert_eq!(root.height, 80.0);
+        assert_eq!(root.image.as_ref().unwrap().width, 120);
+    }
+
+    #[test]
+    fn img_with_explicit_css_width_and_height_ignores_the_intrinsic_size() {
+        let mut el = Element::new("img");
+        el.attributes.insert("src".to_string(), "photo.png".to_string());
+        let node = leaf_styled_node(&el, &[("width", "50px"), ("height", "30px")]);
+        let mut images = ferris_scene::ImageMap::new();
+        images.insert("photo.png".to_string(), tiny_image(120, 80));
+
+        let root = layout_with_images(&node, 800.0, 600.0, &images).unwrap();
+
+        assert_eq!(root.width, 50.0);
+        assert_eq!(root.height, 30.0);
+    }
+
+    #[test]
+    fn img_with_no_matching_image_map_entry_has_a_zero_size_box_and_no_image() {
+        let mut el = Element::new("img");
+        el.attributes.insert("src".to_string(), "missing.png".to_string());
+        let node = leaf_styled_node(&el, &[]);
+        let images = ferris_scene::ImageMap::new();
+
+        let root = layout_with_images(&node, 800.0, 600.0, &images).unwrap();
+
+        assert_eq!(root.width, 0.0);
+        assert_eq!(root.height, 0.0);
+        assert!(root.image.is_none());
+    }
+
+    #[test]
+    fn non_img_elements_never_get_an_image_even_with_a_matching_map_entry() {
+        let el = Element::new("div");
+        let node = leaf_styled_node(&el, &[]);
+        let mut images = ferris_scene::ImageMap::new();
+        images.insert("".to_string(), tiny_image(10, 10)); // a div has no `src`, so this must never match
+
+        let root = layout_with_images(&node, 800.0, 600.0, &images).unwrap();
+
+        assert!(root.image.is_none());
+    }
+
+    #[test]
+    fn layout_without_images_behaves_exactly_like_before_this_change() {
+        let el = Element::new("div");
+        let node = leaf_styled_node(&el, &[("width", "100px"), ("height", "50px")]);
+        let root = layout(&node, 800.0, 600.0).unwrap();
+        assert_eq!(root.width, 100.0);
+        assert_eq!(root.height, 50.0);
+        assert!(root.image.is_none());
     }
 }

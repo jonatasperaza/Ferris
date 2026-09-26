@@ -71,10 +71,12 @@ fn realistic_page_paints_background_rects_and_text_in_the_right_places() {
     let rects: Vec<_> = frame.commands.iter().filter_map(|c| match c {
         DrawCommand::Rect(r) => Some(r),
         DrawCommand::Text(_) => None,
+        DrawCommand::Image(_) => None,
     }).collect();
     let texts: Vec<_> = frame.commands.iter().filter_map(|c| match c {
         DrawCommand::Text(t) => Some(t),
         DrawCommand::Rect(_) => None,
+        DrawCommand::Image(_) => None,
     }).collect();
 
     // #page and #head both have background-color; #content and #para1 don't.
@@ -132,6 +134,7 @@ fn long_paragraph_in_a_narrow_box_wraps_into_multiple_text_commands() {
     let texts: Vec<_> = frame.commands.iter().filter_map(|c| match c {
         DrawCommand::Text(t) => Some(t),
         DrawCommand::Rect(_) => None,
+        DrawCommand::Image(_) => None,
     }).collect();
 
     assert!(texts.len() > 1, "expected the long paragraph to wrap into multiple TextCommands, got {}", texts.len());
@@ -175,6 +178,7 @@ fn inline_element_color_differs_from_surrounding_text_through_real_pipeline() {
     let texts: Vec<_> = frame.commands.iter().filter_map(|c| match c {
         DrawCommand::Text(t) => Some(t),
         DrawCommand::Rect(_) => None,
+        DrawCommand::Image(_) => None,
     }).collect();
 
     assert_eq!(texts.len(), 3, "expected 3 runs: 'Hello ', 'bold', ' world'");

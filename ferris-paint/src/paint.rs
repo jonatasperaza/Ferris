@@ -20,6 +20,16 @@ fn paint_node(node: &LayoutBox, frame: &mut Frame) {
         frame.push(DrawCommand::Rect(RectCommand { x: bx, y: by, width: bw, height: bh, color, corner_radius: 0.0 }));
     }
 
+    if let Some(image) = &node.image {
+        frame.push(DrawCommand::Image(ferris_scene::ImageCommand {
+            x: node.x,
+            y: node.y,
+            width: node.width,
+            height: node.height,
+            image: image.clone(),
+        }));
+    }
+
     if !node.lines.is_empty() {
         let size = resolve_font_size(&node.styled_node.style);
         let line_h = ferris_text::line_height(size);
@@ -69,6 +79,7 @@ mod tests {
             padding: edges,
             lines: Vec::new(),
             children: Vec::new(),
+            image: None,
         }
     }
 
@@ -154,6 +165,7 @@ mod tests {
                 vec![InlineRun { text: "second line".to_string(), style: &styled.style, x_offset: 0.0 }],
             ],
             children: Vec::new(),
+            image: None,
         };
 
         let frame = paint(&node);
@@ -188,6 +200,7 @@ mod tests {
             padding: Edges::default(),
             lines: Vec::new(),
             children: Vec::new(),
+            image: None,
         };
 
         let frame = paint(&node);
@@ -213,6 +226,7 @@ mod tests {
             padding: Edges::default(),
             lines: Vec::new(),
             children: vec![child_box],
+            image: None,
         };
 
         let frame = paint(&parent_box);
@@ -221,5 +235,22 @@ mod tests {
         let DrawCommand::Rect(second) = &frame.commands[1] else { panic!("expected rect") };
         assert_eq!(first.color, [1.0, 0.0, 0.0, 1.0], "parent's background must be painted before the child's");
         assert_eq!(second.color, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn image_bearing_box_emits_an_image_command_at_its_content_box_position() {
+        let element = Element::new("img");
+        let styled = StyledNode { element: &element, style: HashMap::new(), children: Vec::new() };
+        let mut node = leaf_box(&styled, 10.0, 20.0, 120.0, 80.0, Edges::default());
+        node.image = Some(ferris_scene::DecodedImage { width: 120, height: 80, rgba: std::sync::Arc::from(vec![0u8; 120 * 80 * 4]) });
+
+        let frame = paint(&node);
+
+        assert_eq!(frame.commands.len(), 1);
+        let DrawCommand::Image(img) = &frame.commands[0] else { panic!("expected an image command") };
+        assert_eq!(img.x, 10.0);
+        assert_eq!(img.y, 20.0);
+        assert_eq!(img.width, 120.0);
+        assert_eq!(img.height, 80.0);
     }
 }
